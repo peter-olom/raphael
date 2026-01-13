@@ -1,0 +1,20 @@
+services:
+  raphael:
+    build: .
+    container_name: raphael
+    ports:
+      - "6274:6274"
+    volumes:
+      - raphael-data:/app/data
+    environment:
+      - PORT=6274
+      - RAPHAEL_DB_PATH=/app/data/raphael.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6274/api/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  raphael-data:
