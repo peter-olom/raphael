@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
 import type { DashboardRow, DashboardSpecV1, WidgetSpec } from './dashboards/types';
 import { computeWidget, parseDashboardSpec } from './dashboards/render';
+import GridLayout, { useContainerWidth, type Layout } from 'react-grid-layout';
 
 interface Trace {
   id: number;
@@ -48,7 +49,7 @@ interface Drop {
   events_retention_ms: number | null;
 }
 
-type Tab = 'events' | 'traces' | 'dashboards';
+type Tab = 'events' | 'traces' | 'dashboards' | 'settings';
 
 const styles = {
   container: {
@@ -172,6 +173,28 @@ const styles = {
     background: '#111',
     fontSize: '12px',
     color: '#bbb',
+  },
+  badgeOutline: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '4px 10px',
+    borderRadius: '999px',
+    border: '1px solid #333',
+    background: '#0f0f0f',
+    fontSize: '12px',
+    fontWeight: 700,
+    letterSpacing: '0.02em',
+  },
+  badgeView: {
+    borderColor: '#14532d',
+    color: '#4ade80',
+    background: '#052e16',
+  },
+  badgeEdit: {
+    borderColor: '#3730a3',
+    color: '#c7d2fe',
+    background: '#111827',
   },
   chip: {
     display: 'inline-flex',
@@ -533,7 +556,7 @@ const styles = {
     overflow: 'hidden',
     display: 'flex',
     flexDirection: 'column' as const,
-    minHeight: '140px',
+    minHeight: 0,
   },
   cardHeader: {
     padding: '10px 12px',
@@ -612,6 +635,89 @@ const styles = {
   },
 };
 
+const DASHBOARD_COLS = 12;
+const DASHBOARD_ROW_HEIGHT = 84;
+
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function defaultWidgetLayout(widget: WidgetSpec): { w: number; h: number } {
+  if (widget.type === 'stat') return { w: 3, h: 1 };
+  if (widget.type === 'timeseries') return { w: 6, h: 2 };
+  return { w: 6, h: 2 };
+}
+
+type Rect = { x: number; y: number; w: number; h: number };
+
+function rectsOverlap(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function findFirstFit(placed: Rect[], cols: number, w: number, h: number, startY = 0): { x: number; y: number } {
+  const safeW = Math.max(1, Math.min(cols, w));
+  const safeH = Math.max(1, h);
+  const maxY = Math.max(startY, ...placed.map((r) => r.y + r.h), 0) + 200;
+  for (let y = Math.max(0, startY); y <= maxY; y += 1) {
+    for (let x = 0; x <= cols - safeW; x += 1) {
+      const candidate: Rect = { x, y, w: safeW, h: safeH };
+      if (!placed.some((r) => rectsOverlap(r, candidate))) return { x, y };
+    }
+  }
+  return { x: 0, y: maxY + 1 };
+}
+
+function normalizeDashboardSpec(spec: DashboardSpecV1, cols = DASHBOARD_COLS): DashboardSpecV1 {
+  const placed: Rect[] = [];
+  const widgets = spec.widgets.map((widget) => {
+    const defaults = defaultWidgetLayout(widget);
+    const raw = widget.layout ?? ({} as any);
+    const w = clampInt(raw.w, 1, cols, defaults.w);
+    const h = clampInt(raw.h, 1, 50, defaults.h);
+
+    const hasX = raw.x !== undefined && Number.isFinite(Number(raw.x));
+    const hasY = raw.y !== undefined && Number.isFinite(Number(raw.y));
+    const x0 = hasX ? clampInt(raw.x, 0, Math.max(0, cols - 1), 0) : 0;
+    const y0 = hasY ? clampInt(raw.y, 0, 100_000, 0) : 0;
+    const x = Math.min(x0, Math.max(0, cols - w));
+    const y = y0;
+
+    const candidate: Rect = { x, y, w, h };
+    const needsReflow =
+      !hasX ||
+      !hasY ||
+      candidate.x + candidate.w > cols ||
+      placed.some((r) => rectsOverlap(r, candidate));
+
+    const pos = needsReflow ? findFirstFit(placed, cols, w, h, hasY ? y : 0) : { x, y };
+    const rect: Rect = { x: pos.x, y: pos.y, w, h };
+    placed.push(rect);
+
+    return { ...widget, layout: { x: rect.x, y: rect.y, w: rect.w, h: rect.h } } as WidgetSpec;
+  });
+
+  return { ...spec, widgets };
+}
+
+function addPlacedWidget(existing: WidgetSpec[], widget: WidgetSpec, cols = DASHBOARD_COLS): WidgetSpec {
+  const base = normalizeDashboardSpec(
+    { version: 1, name: '', sampleSize: 100, bucketSeconds: 60, widgets: existing },
+    cols
+  );
+  const placed: Rect[] = base.widgets
+    .map((w) => w.layout)
+    .filter(Boolean)
+    .map((l: any) => ({ x: l.x ?? 0, y: l.y ?? 0, w: l.w ?? 6, h: l.h ?? 2 }));
+
+  const defaults = defaultWidgetLayout(widget);
+  const w = clampInt(widget.layout?.w, 1, cols, defaults.w);
+  const h = clampInt(widget.layout?.h, 1, 50, defaults.h);
+  const pos = findFirstFit(placed, cols, w, h, Math.max(0, ...placed.map((r) => r.y + r.h), 0));
+  return { ...widget, layout: { ...(widget.layout ?? {}), x: pos.x, y: pos.y, w, h } } as WidgetSpec;
+}
+
 function formatTime(timestamp: number | undefined | null): string {
   if (!timestamp || isNaN(timestamp)) return '-';
   const date = new Date(timestamp);
@@ -645,6 +751,8 @@ function getEventTime(event: WideEvent): number {
 
 type FilterOp = 'in' | 'contains';
 type FilterState = Record<string, { op: FilterOp; values: string[] }>;
+type SetStateAction<T> = T | ((prev: T) => T);
+type FilterSetter = (action: SetStateAction<FilterState>) => void;
 
 function normalizeFilterKey(tab: Tab, key: string): string {
   if (tab === 'events') {
@@ -1525,7 +1633,7 @@ function TraceDetailModal({
 
 export default function App() {
   const parseTab = (value: string | null): Tab | null => {
-    if (value === 'events' || value === 'traces' || value === 'dashboards') return value;
+    if (value === 'events' || value === 'traces' || value === 'dashboards' || value === 'settings') return value;
     return null;
   };
 
@@ -1545,9 +1653,7 @@ export default function App() {
   const [showFilters, setShowFilters] = useState(false);
   const [eventFilters, setEventFilters] = useState<FilterState>({});
   const [traceFilters, setTraceFilters] = useState<FilterState>({});
-  const [showNewDrop, setShowNewDrop] = useState(false);
   const [newDropName, setNewDropName] = useState('');
-  const [showRetention, setShowRetention] = useState(false);
   const [retentionTracesDays, setRetentionTracesDays] = useState<string>('3');
   const [retentionEventsDays, setRetentionEventsDays] = useState<string>('7');
   const [selected, setSelected] = useState<Selected | null>(null);
@@ -1558,12 +1664,20 @@ export default function App() {
   const [dashboardSample, setDashboardSample] = useState<WideEvent[]>([]);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardEditingWidgetId, setDashboardEditingWidgetId] = useState<string | null>(null);
+  const [dashboardMode, setDashboardMode] = useState<'view' | 'edit'>(() => {
+    const stored = window.localStorage.getItem('raphael.dashboardMode');
+    return stored === 'edit' ? 'edit' : 'view';
+  });
   const [showNewDashboard, setShowNewDashboard] = useState(false);
   const [newDashboardName, setNewDashboardName] = useState('My Dashboard');
   const [showGenerateDashboard, setShowGenerateDashboard] = useState(false);
   const [generateLimit, setGenerateLimit] = useState<string>('2000');
   const [generateUseAi, setGenerateUseAi] = useState(false);
   const [appToast, setAppToast] = useState<string | null>(null);
+  const [openRouterModel, setOpenRouterModel] = useState('');
+  const [openRouterApiKey, setOpenRouterApiKey] = useState('');
+  const [openRouterApiKeySet, setOpenRouterApiKeySet] = useState(false);
+  const [openRouterSaving, setOpenRouterSaving] = useState(false);
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1576,6 +1690,10 @@ export default function App() {
       window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
     }
   }, [tab]);
+
+  useEffect(() => {
+    window.localStorage.setItem('raphael.dashboardMode', dashboardMode);
+  }, [dashboardMode]);
 
   // Support back/forward navigation if the user edits the URL or uses history.
   useEffect(() => {
@@ -1646,7 +1764,7 @@ export default function App() {
     }
     try {
       if (dropIdRef.current === null) return;
-      if (tab === 'dashboards') return;
+      if (tab === 'dashboards' || tab === 'settings') return;
       if (tab === 'traces') {
         const res = await fetch(
           `/api/search/traces?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}`
@@ -1710,6 +1828,20 @@ export default function App() {
   }, [tab, dashboardSpec]);
 
   useEffect(() => {
+    if (tab !== 'settings') return;
+    void (async () => {
+      try {
+        const res = await fetch('/api/settings/openrouter');
+        const json = (await res.json()) as { model: string; api_key_set: boolean };
+        setOpenRouterModel(json.model || '');
+        setOpenRouterApiKeySet(Boolean(json.api_key_set));
+      } catch (error) {
+        console.error('Failed to fetch OpenRouter settings:', error);
+      }
+    })();
+  }, [tab]);
+
+  useEffect(() => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
 
@@ -1770,8 +1902,15 @@ export default function App() {
     };
   }, [paused, subscribeWs]);
 
-  const activeFilters = tab === 'events' ? eventFilters : traceFilters;
-  const setActiveFilters = tab === 'events' ? setEventFilters : setTraceFilters;
+  const activeFilters: FilterState =
+    tab === 'events' ? eventFilters : tab === 'traces' ? traceFilters : {};
+  const noopFilterSetter: FilterSetter = () => {};
+  const setActiveFilters: FilterSetter =
+    tab === 'events'
+      ? (setEventFilters as unknown as FilterSetter)
+      : tab === 'traces'
+        ? (setTraceFilters as unknown as FilterSetter)
+        : noopFilterSetter;
 
   const visibleEvents = applyFilters('events', events, eventFilters, search);
   const visibleTraces = applyFilters('traces', traces, traceFilters, search);
@@ -1785,8 +1924,45 @@ export default function App() {
       }
     : null;
 
+  const dashboardComputeKey = useMemo(() => {
+    if (!effectiveDashboardSpec) return '';
+    return JSON.stringify({
+      bucketSeconds: effectiveDashboardSpec.bucketSeconds,
+      widgets: effectiveDashboardSpec.widgets.map((w) => {
+        const base: any = { id: w.id, type: w.type, title: w.title };
+        if (w.type === 'stat') base.metric = (w as any).metric;
+        if (w.type === 'timeseries') base.metric = (w as any).metric;
+        if (w.type === 'bar') {
+          base.field = (w as any).field;
+          base.topN = (w as any).topN;
+        }
+        if (w.type === 'histogram') {
+          base.field = (w as any).field;
+          base.bins = (w as any).bins;
+        }
+        return base;
+      }),
+    });
+  }, [effectiveDashboardSpec]);
+
+  const dashboardWidgetResults = useMemo(() => {
+    if (!effectiveDashboardSpec || dashboardSample.length === 0) return new Map<string, any>();
+    const map = new Map<string, any>();
+    for (const w of effectiveDashboardSpec.widgets) {
+      const withoutLayout = { ...w, layout: undefined } as any;
+      map.set(w.id, computeWidget(withoutLayout, dashboardSample as any, effectiveDashboardSpec));
+    }
+    return map;
+  }, [dashboardSample, dashboardComputeKey]);
+
+  const dashboardContainer = useContainerWidth();
+
   useEffect(() => {
     if (!effectiveDashboardSpec) {
+      setDashboardEditingWidgetId(null);
+      return;
+    }
+    if (dashboardMode === 'view') {
       setDashboardEditingWidgetId(null);
       return;
     }
@@ -1797,9 +1973,14 @@ export default function App() {
       return;
     }
     setDashboardEditingWidgetId(effectiveDashboardSpec.widgets[0]?.id ?? null);
-  }, [effectiveDashboardSpec, dashboardEditingWidgetId]);
+  }, [effectiveDashboardSpec, dashboardEditingWidgetId, dashboardMode]);
 
-  const statsForTab = computeFieldStats(tab, tab === 'events' ? events : traces, Object.keys(activeFilters));
+  const statsForTab =
+    tab === 'events'
+      ? computeFieldStats('events', events, Object.keys(activeFilters))
+      : tab === 'traces'
+        ? computeFieldStats('traces', traces, Object.keys(activeFilters))
+        : [];
   const suggestedKeys = statsForTab.slice(0, 8).map((s) => s.key);
   const filterKeys = Array.from(new Set([...suggestedKeys, ...Object.keys(activeFilters)]));
   const statsByKey = new Map(statsForTab.map((s) => [s.key, s]));
@@ -1860,7 +2041,6 @@ export default function App() {
       }
       const created = (await res.json()) as { id: number };
       setNewDropName('');
-      setShowNewDrop(false);
       await fetchDrops();
       setDropId(created.id);
     } catch (error) {
@@ -1882,7 +2062,6 @@ export default function App() {
         body: JSON.stringify({ traces_days: tracesDays, events_days: eventsDays }),
       });
       if (!res.ok) throw new Error('Failed to save retention');
-      setShowRetention(false);
       await fetchDrops();
       fetchData();
     } catch (error) {
@@ -1908,7 +2087,7 @@ export default function App() {
       setDashboardSelectedId(row.id);
       setDashboardName(row.name);
       const spec = parseDashboardSpec(row.spec_json);
-      setDashboardSpec(spec);
+      setDashboardSpec(spec ? normalizeDashboardSpec(spec) : null);
       setDashboardSample([]);
       setDashboardEditingWidgetId(null);
     } catch (error) {
@@ -1944,11 +2123,11 @@ export default function App() {
       sampleSize: 2000,
       bucketSeconds: 60,
       widgets: [
-        { id: uuid('stat'), type: 'stat', title: 'Events', metric: 'events', layout: { w: 3, h: 1 } },
-        { id: uuid('stat'), type: 'stat', title: 'Errors', metric: 'errors', layout: { w: 3, h: 1 } },
-        { id: uuid('stat'), type: 'stat', title: 'Error rate', metric: 'error_rate', layout: { w: 3, h: 1 } },
-        { id: uuid('bar'), type: 'bar', title: 'Top services', field: 'service_name', topN: 8, layout: { w: 6, h: 2 } },
-        { id: uuid('hist'), type: 'histogram', title: 'Duration (ms)', field: 'duration_ms', bins: 12, layout: { w: 6, h: 2 } },
+        { id: uuid('stat'), type: 'stat', title: 'Events', metric: 'events', layout: { x: 0, y: 0, w: 3, h: 1 } },
+        { id: uuid('stat'), type: 'stat', title: 'Errors', metric: 'errors', layout: { x: 3, y: 0, w: 3, h: 1 } },
+        { id: uuid('stat'), type: 'stat', title: 'Error rate', metric: 'error_rate', layout: { x: 6, y: 0, w: 3, h: 1 } },
+        { id: uuid('bar'), type: 'bar', title: 'Top services', field: 'service_name', topN: 8, layout: { x: 0, y: 1, w: 6, h: 2 } },
+        { id: uuid('hist'), type: 'histogram', title: 'Duration (ms)', field: 'duration_ms', bins: 12, layout: { x: 6, y: 1, w: 6, h: 2 } },
       ],
     };
 
@@ -1956,7 +2135,7 @@ export default function App() {
       const res = await fetch(`/api/dashboards?dropId=${dropIdRef.current}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, spec: defaultSpec }),
+        body: JSON.stringify({ name, spec: normalizeDashboardSpec(defaultSpec) }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -1968,7 +2147,8 @@ export default function App() {
       await fetchDashboards();
       setDashboardSelectedId(row.id);
       setDashboardName(row.name);
-      setDashboardSpec(parseDashboardSpec(row.spec_json));
+      const spec = parseDashboardSpec(row.spec_json);
+      setDashboardSpec(spec ? normalizeDashboardSpec(spec) : null);
       setDashboardSample([]);
       setDashboardEditingWidgetId(null);
     } catch (error) {
@@ -1999,7 +2179,8 @@ export default function App() {
       await fetchDashboards();
       setDashboardSelectedId(row.id);
       setDashboardName(row.name);
-      setDashboardSpec(parseDashboardSpec(row.spec_json));
+      const spec = parseDashboardSpec(row.spec_json);
+      setDashboardSpec(spec ? normalizeDashboardSpec(spec) : null);
       flashToast('Dashboard saved');
     } catch (error) {
       alert((error as Error).message);
@@ -2040,7 +2221,7 @@ export default function App() {
       const spec = json.spec as DashboardSpecV1;
       setDashboardSelectedId(null);
       setDashboardName(spec.name || 'Auto dashboard');
-      setDashboardSpec(spec);
+      setDashboardSpec(normalizeDashboardSpec(spec));
       setShowGenerateDashboard(false);
       setTab('dashboards');
       setDashboardSample([]);
@@ -2052,8 +2233,77 @@ export default function App() {
     }
   };
 
+  const saveOpenRouterSettings = async () => {
+    setOpenRouterSaving(true);
+    try {
+      const res = await fetch('/api/settings/openrouter', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: openRouterModel,
+          api_key: openRouterApiKey.trim() ? openRouterApiKey.trim() : undefined,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || 'Failed to save OpenRouter settings');
+      setOpenRouterApiKey('');
+      setOpenRouterApiKeySet(Boolean(json.api_key_set));
+      setOpenRouterModel(json.model || openRouterModel);
+      flashToast('OpenRouter settings saved');
+    } catch (error) {
+      alert((error as Error).message);
+    } finally {
+      setOpenRouterSaving(false);
+    }
+  };
+
+  const clearOpenRouterKey = async () => {
+    if (!confirm('Clear stored OpenRouter API key?')) return;
+    setOpenRouterSaving(true);
+    try {
+      const res = await fetch('/api/settings/openrouter', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: '' }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || 'Failed to clear OpenRouter API key');
+      setOpenRouterApiKey('');
+      setOpenRouterApiKeySet(false);
+      flashToast('OpenRouter API key cleared');
+    } catch (error) {
+      alert((error as Error).message);
+    } finally {
+      setOpenRouterSaving(false);
+    }
+  };
+
   const updateDashboardSpec = (fn: (prev: DashboardSpecV1) => DashboardSpecV1) => {
     setDashboardSpec((prev) => (prev ? fn(prev) : prev));
+  };
+
+  const applyDashboardGridLayout = (layout: Layout) => {
+    if (dashboardMode !== 'edit') return;
+    const byId = new Map(layout.map((l) => [l.i, l]));
+    updateDashboardSpec((prev) => {
+      let changed = false;
+      const widgets = prev.widgets.map((w) => {
+        const l = byId.get(w.id);
+        if (!l) return w;
+        const defaults = defaultWidgetLayout(w);
+        const current = {
+          x: w.layout?.x ?? 0,
+          y: w.layout?.y ?? 0,
+          w: w.layout?.w ?? defaults.w,
+          h: w.layout?.h ?? defaults.h,
+        };
+        const next = { ...current, x: l.x, y: l.y, w: l.w, h: l.h };
+        if (current.x === next.x && current.y === next.y && current.w === next.w && current.h === next.h) return w;
+        changed = true;
+        return { ...w, layout: next } as WidgetSpec;
+      });
+      return changed ? { ...prev, widgets } : prev;
+    });
   };
 
   const addDashboardWidget = (type: WidgetSpec['type']) => {
@@ -2067,7 +2317,9 @@ export default function App() {
             : type === 'timeseries'
               ? { id: uuid('ts'), type: 'timeseries', title: 'New series', metric: 'events', layout: baseLayout }
               : { id: uuid('hist'), type: 'histogram', title: 'New histogram', field: 'duration_ms', bins: 12, layout: baseLayout };
-      return { ...prev, widgets: [...prev.widgets, widget] };
+      const normalized = normalizeDashboardSpec(prev);
+      const placed = addPlacedWidget(normalized.widgets, widget);
+      return { ...normalized, widgets: [...normalized.widgets, placed] };
     });
   };
 
@@ -2218,6 +2470,12 @@ export default function App() {
           >
             Dashboards
           </button>
+          <button
+            style={{ ...styles.tab, ...(tab === 'settings' ? styles.tabActive : {}) }}
+            onClick={() => setTab('settings')}
+          >
+            Settings
+          </button>
         </div>
 
         <div style={styles.toolbar}>
@@ -2234,14 +2492,16 @@ export default function App() {
               </option>
             ))}
           </select>
-          <button style={styles.button} onClick={() => setShowNewDrop(true)}>
-            New Drop
-          </button>
-          <button style={styles.button} onClick={() => setShowRetention(true)} disabled={dropId === null}>
-            Retention
-          </button>
           {tab === 'dashboards' ? (
             <>
+              <button
+                style={styles.button}
+                onClick={() => setDashboardMode(dashboardMode === 'edit' ? 'view' : 'edit')}
+                disabled={!dashboardSpec}
+                title={dashboardMode === 'edit' ? 'Hide config knobs' : 'Show config knobs'}
+              >
+                {dashboardMode === 'edit' ? 'View Mode' : 'Edit Mode'}
+              </button>
               <button style={styles.button} onClick={() => setShowNewDashboard(true)} disabled={dropId === null}>
                 New Dashboard
               </button>
@@ -2254,16 +2514,20 @@ export default function App() {
               <button style={styles.button} onClick={refreshDashboardSample} disabled={!dashboardSpec || dropId === null}>
                 Refresh Data
               </button>
-              <button style={styles.button} onClick={saveDashboard} disabled={!dashboardSpec || dropId === null}>
-                Save
-              </button>
-              <button
-                style={{ ...styles.button, ...styles.buttonDanger }}
-                onClick={deleteDashboardById}
-                disabled={dashboardSelectedId === null}
-              >
-                Delete
-              </button>
+              {dashboardMode === 'edit' && (
+                <>
+                  <button style={styles.button} onClick={saveDashboard} disabled={!dashboardSpec || dropId === null}>
+                    Save
+                  </button>
+                  <button
+                    style={{ ...styles.button, ...styles.buttonDanger }}
+                    onClick={deleteDashboardById}
+                    disabled={dashboardSelectedId === null}
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
               <div style={styles.pill}>
                 Sample:
                 <span style={{ color: '#fff' }}>
@@ -2271,6 +2535,11 @@ export default function App() {
                 </span>
               </div>
             </>
+          ) : tab === 'settings' ? (
+            <div style={styles.pill}>
+              <span style={{ color: '#fff' }}>Settings</span>
+              <span style={{ color: '#777' }}>Configure drop retention & integrations</span>
+            </div>
           ) : (
             <>
               <input
@@ -2320,7 +2589,7 @@ export default function App() {
           )}
         </div>
 
-        {tab !== 'dashboards' && showFilters && (
+        {tab !== 'dashboards' && tab !== 'settings' && showFilters && (
           <div style={styles.filtersPanel}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '12px', marginBottom: '12px' }}>
               <div style={{ color: '#fff', fontWeight: 700 }}>Smart Filters</div>
@@ -2482,11 +2751,32 @@ export default function App() {
                 </div>
               </div>
 
-              <div style={{ ...styles.pane, flex: 1 }}>
+              <div
+                style={{
+                  ...styles.pane,
+                  flex: 1,
+                  ...(dashboardMode === 'view'
+                    ? { borderColor: '#14532d', background: '#0b1410' }
+                    : { borderColor: '#333' }),
+                }}
+              >
                 <div style={styles.paneHeader}>
-                  <span style={styles.paneTitle}>Builder</span>
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <span style={styles.paneTitle}>{dashboardMode === 'view' ? 'Dashboard' : 'Builder'}</span>
+                    <span
+                      style={{
+                        ...styles.badgeOutline,
+                        ...(dashboardMode === 'view' ? styles.badgeView : styles.badgeEdit),
+                      }}
+                    >
+                      {dashboardMode === 'view' ? 'VIEW' : 'EDIT'}
+                    </span>
+                  </div>
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     {dashboardLoading && <span style={styles.tiny}>Loading…</span>}
+                    {dashboardMode === 'view' && effectiveDashboardSpec && (
+                      <span style={styles.tiny}>{effectiveDashboardSpec.name}</span>
+                    )}
                   </div>
                 </div>
                 <div style={styles.paneBody}>
@@ -2496,329 +2786,346 @@ export default function App() {
                     </div>
                   ) : (
                     <>
-                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '12px', marginBottom: '12px' }}>
-                        <div>
-                          <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Dashboard name</div>
-                          <input
-                            style={styles.filterInput}
-                            value={dashboardName}
-                            onChange={(e) => {
-                              const name = e.target.value;
-                              setDashboardName(name);
-                              setDashboardSpec((prev) => (prev ? { ...prev, name } : prev));
-                            }}
-                          />
-                        </div>
-                        <div>
-                          <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Sample size (N)</div>
-                          <input
-                            style={styles.filterInput}
-                            inputMode="numeric"
-                            value={String(effectiveDashboardSpec.sampleSize)}
-                            onChange={(e) =>
-                              updateDashboardSpec((prev) => ({
-                                ...prev,
-                                sampleSize: Number(e.target.value || '0'),
-                              }))
-                            }
-                          />
-                        </div>
-                        <div>
-                          <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Bucket (sec)</div>
-                          <input
-                            style={styles.filterInput}
-                            inputMode="numeric"
-                            value={String(effectiveDashboardSpec.bucketSeconds)}
-                            onChange={(e) =>
-                              updateDashboardSpec((prev) => ({
-                                ...prev,
-                                bucketSeconds: Number(e.target.value || '0'),
-                              }))
-                            }
-                          />
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'grid', gridTemplateColumns: '420px 1fr', gap: '16px', alignItems: 'start' }}>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const, marginBottom: '12px' }}>
-                            <span style={styles.pill}>Add:</span>
-                            <button style={styles.button} onClick={() => addDashboardWidget('stat')}>
-                              Stat
-                            </button>
-                            <button style={styles.button} onClick={() => addDashboardWidget('timeseries')}>
-                              Timeseries
-                            </button>
-                            <button style={styles.button} onClick={() => addDashboardWidget('bar')}>
-                              Bar
-                            </button>
-                            <button style={styles.button} onClick={() => addDashboardWidget('histogram')}>
-                              Histogram
-                            </button>
+                      {dashboardMode === 'edit' && (
+                        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                          <div>
+                            <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Dashboard name</div>
+                            <input
+                              style={styles.filterInput}
+                              value={dashboardName}
+                              onChange={(e) => {
+                                const name = e.target.value;
+                                setDashboardName(name);
+                                setDashboardSpec((prev) => (prev ? { ...prev, name } : prev));
+                              }}
+                            />
                           </div>
+                          <div>
+                            <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Sample size (N)</div>
+                            <input
+                              style={styles.filterInput}
+                              inputMode="numeric"
+                              value={String(effectiveDashboardSpec.sampleSize)}
+                              onChange={(e) =>
+                                updateDashboardSpec((prev) => ({
+                                  ...prev,
+                                  sampleSize: Number(e.target.value || '0'),
+                                }))
+                              }
+                            />
+                          </div>
+                          <div>
+                            <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Bucket (sec)</div>
+                            <input
+                              style={styles.filterInput}
+                              inputMode="numeric"
+                              value={String(effectiveDashboardSpec.bucketSeconds)}
+                              onChange={(e) =>
+                                updateDashboardSpec((prev) => ({
+                                  ...prev,
+                                  bucketSeconds: Number(e.target.value || '0'),
+                                }))
+                              }
+                            />
+                          </div>
+                        </div>
+                      )}
 
-                          <div style={{ ...styles.pane, overflow: 'hidden', maxHeight: '70vh' }}>
-                            <div style={styles.paneHeader}>
-                              <span style={styles.paneTitle}>Widgets</span>
-                              <span style={styles.tiny}>{effectiveDashboardSpec.widgets.length}</span>
+                      <div
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: dashboardMode === 'edit' ? '420px 1fr' : '1fr',
+                          gap: '16px',
+                          alignItems: 'start',
+                        }}
+                      >
+                        {dashboardMode === 'edit' && (
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const, marginBottom: '12px' }}>
+                              <span style={styles.pill}>Add:</span>
+                              <button style={styles.button} onClick={() => addDashboardWidget('stat')}>
+                                Stat
+                              </button>
+                              <button style={styles.button} onClick={() => addDashboardWidget('timeseries')}>
+                                Timeseries
+                              </button>
+                              <button style={styles.button} onClick={() => addDashboardWidget('bar')}>
+                                Bar
+                              </button>
+                              <button style={styles.button} onClick={() => addDashboardWidget('histogram')}>
+                                Histogram
+                              </button>
                             </div>
-                            <div style={{ ...styles.paneBody, maxHeight: 'calc(70vh - 44px)', padding: 0 }}>
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '12px' }}>
-                                {effectiveDashboardSpec.widgets.map((w, idx) => {
-                                  const expanded = w.id === dashboardEditingWidgetId;
 
-                                  const setWidgetType = (nextType: WidgetSpec['type']) => {
-                                    updateDashboardSpec((prev) => ({
-                                      ...prev,
-                                      widgets: prev.widgets.map((x) => {
-                                        if (x.id !== w.id) return x;
-                                        if (nextType === 'stat')
+                            <div style={{ ...styles.pane, overflow: 'hidden', maxHeight: '70vh' }}>
+                              <div style={styles.paneHeader}>
+                                <span style={styles.paneTitle}>Widgets</span>
+                                <span style={styles.tiny}>{effectiveDashboardSpec.widgets.length}</span>
+                              </div>
+                              <div style={{ ...styles.paneBody, maxHeight: 'calc(70vh - 44px)', padding: 0 }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '12px' }}>
+                                  {effectiveDashboardSpec.widgets.map((w, idx) => {
+                                    const expanded = w.id === dashboardEditingWidgetId;
+
+                                    const setWidgetType = (nextType: WidgetSpec['type']) => {
+                                      updateDashboardSpec((prev) => ({
+                                        ...prev,
+                                        widgets: prev.widgets.map((x) => {
+                                          if (x.id !== w.id) return x;
+                                          if (nextType === 'stat')
+                                            return {
+                                              id: x.id,
+                                              type: 'stat',
+                                              title: x.title || 'Stat',
+                                              metric: (x as any).metric || 'events',
+                                              layout: x.layout ?? { w: 3, h: 1 },
+                                            };
+                                          if (nextType === 'timeseries')
+                                            return {
+                                              id: x.id,
+                                              type: 'timeseries',
+                                              title: x.title || 'Series',
+                                              metric: (x as any).metric || 'events',
+                                              layout: x.layout ?? { w: 6, h: 2 },
+                                            };
+                                          if (nextType === 'bar')
+                                            return {
+                                              id: x.id,
+                                              type: 'bar',
+                                              title: x.title || 'Bar',
+                                              field: (x as any).field || 'service_name',
+                                              topN: Number((x as any).topN || 8),
+                                              layout: x.layout ?? { w: 6, h: 2 },
+                                            };
                                           return {
                                             id: x.id,
-                                            type: 'stat',
-                                            title: x.title || 'Stat',
-                                            metric: (x as any).metric || 'events',
-                                            layout: x.layout ?? { w: 3, h: 1 },
-                                          };
-                                        if (nextType === 'timeseries')
-                                          return {
-                                            id: x.id,
-                                            type: 'timeseries',
-                                            title: x.title || 'Series',
-                                            metric: (x as any).metric || 'events',
+                                            type: 'histogram',
+                                            title: x.title || 'Histogram',
+                                            field: (x as any).field || 'duration_ms',
+                                            bins: Number((x as any).bins || 12),
                                             layout: x.layout ?? { w: 6, h: 2 },
                                           };
-                                        if (nextType === 'bar')
-                                          return {
-                                            id: x.id,
-                                            type: 'bar',
-                                            title: x.title || 'Bar',
-                                            field: (x as any).field || 'service_name',
-                                            topN: Number((x as any).topN || 8),
-                                            layout: x.layout ?? { w: 6, h: 2 },
-                                          };
-                                        return {
-                                          id: x.id,
-                                          type: 'histogram',
-                                          title: x.title || 'Histogram',
-                                          field: (x as any).field || 'duration_ms',
-                                          bins: Number((x as any).bins || 12),
-                                          layout: x.layout ?? { w: 6, h: 2 },
-                                        };
-                                      }),
-                                    }));
-                                  };
+                                        }),
+                                      }));
+                                    };
 
-                                  return (
-                                    <div
-                                      key={w.id}
-                                      style={{
-                                        border: '1px solid #2a2a2a',
-                                        borderRadius: '12px',
-                                        background: expanded ? '#0b1020' : '#0f0f0f',
-                                        padding: '10px',
-                                      }}
-                                      onClick={() => setDashboardEditingWidgetId(w.id)}
-                                    >
+                                    return (
                                       <div
+                                        key={w.id}
                                         style={{
-                                          display: 'flex',
-                                          justifyContent: 'space-between',
-                                          gap: '12px',
-                                          alignItems: 'center',
+                                          border: '1px solid #2a2a2a',
+                                          borderRadius: '12px',
+                                          background: expanded ? '#0b1020' : '#0f0f0f',
+                                          padding: '10px',
                                         }}
+                                        onClick={() => setDashboardEditingWidgetId(w.id)}
                                       >
-                                        <div style={{ minWidth: 0 }}>
-                                          <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
-                                            <span style={{ ...styles.mono, color: '#a78bfa' }}>{w.type}</span>
-                                            <span
-                                              style={{
-                                                fontSize: '13px',
-                                                color: '#fff',
-                                                fontWeight: 700,
-                                                overflow: 'hidden',
-                                                textOverflow: 'ellipsis',
-                                                whiteSpace: 'nowrap',
-                                                maxWidth: '260px',
-                                                display: 'inline-block',
-                                                verticalAlign: 'bottom',
+                                        <div
+                                          style={{
+                                            display: 'flex',
+                                            justifyContent: 'space-between',
+                                            gap: '12px',
+                                            alignItems: 'center',
+                                          }}
+                                        >
+                                          <div style={{ minWidth: 0 }}>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                                              <span style={{ ...styles.mono, color: '#a78bfa' }}>{w.type}</span>
+                                              <span
+                                                style={{
+                                                  fontSize: '13px',
+                                                  color: '#fff',
+                                                  fontWeight: 700,
+                                                  overflow: 'hidden',
+                                                  textOverflow: 'ellipsis',
+                                                  whiteSpace: 'nowrap',
+                                                  maxWidth: '260px',
+                                                  display: 'inline-block',
+                                                  verticalAlign: 'bottom',
+                                                }}
+                                              >
+                                                {w.title || '(untitled)'}
+                                              </span>
+                                            </div>
+                                            <div style={styles.tiny}>
+                                              layout {w.layout?.w ?? (w.type === 'stat' ? 3 : 6)}×{w.layout?.h ?? (w.type === 'stat' ? 1 : 2)}
+                                            </div>
+                                          </div>
+
+                                          <div style={{ display: 'flex', gap: '8px' }}>
+                                            <button
+                                              style={styles.copyButton}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                moveDashboardWidget(w.id, -1);
                                               }}
+                                              disabled={idx === 0}
+                                              title="Move up"
                                             >
-                                              {w.title || '(untitled)'}
-                                            </span>
-                                          </div>
-                                          <div style={styles.tiny}>
-                                            layout {w.layout?.w ?? (w.type === 'stat' ? 3 : 6)}×{w.layout?.h ?? (w.type === 'stat' ? 1 : 2)}
+                                              ↑
+                                            </button>
+                                            <button
+                                              style={styles.copyButton}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                moveDashboardWidget(w.id, 1);
+                                              }}
+                                              disabled={idx === effectiveDashboardSpec.widgets.length - 1}
+                                              title="Move down"
+                                            >
+                                              ↓
+                                            </button>
+                                            <button
+                                              style={styles.copyButton}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                deleteDashboardWidget(w.id);
+                                              }}
+                                              title="Remove"
+                                            >
+                                              ×
+                                            </button>
                                           </div>
                                         </div>
 
-                                        <div style={{ display: 'flex', gap: '8px' }}>
-                                          <button
-                                            style={styles.copyButton}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              moveDashboardWidget(w.id, -1);
-                                            }}
-                                            disabled={idx === 0}
-                                            title="Move up"
-                                          >
-                                            ↑
-                                          </button>
-                                          <button
-                                            style={styles.copyButton}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              moveDashboardWidget(w.id, 1);
-                                            }}
-                                            disabled={idx === effectiveDashboardSpec.widgets.length - 1}
-                                            title="Move down"
-                                          >
-                                            ↓
-                                          </button>
-                                          <button
-                                            style={styles.copyButton}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              deleteDashboardWidget(w.id);
-                                            }}
-                                            title="Remove"
-                                          >
-                                            ×
-                                          </button>
-                                        </div>
+                                        {expanded && (
+                                          <div style={{ marginTop: '10px', display: 'grid', gap: '10px' }}>
+                                            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const }}>
+                                              <select
+                                                style={styles.select}
+                                                value={w.type}
+                                                onChange={(e) => setWidgetType(e.target.value as any)}
+                                                onClick={(e) => e.stopPropagation()}
+                                              >
+                                                <option value="stat">stat</option>
+                                                <option value="timeseries">timeseries</option>
+                                                <option value="bar">bar</option>
+                                                <option value="histogram">histogram</option>
+                                              </select>
+                                              <input
+                                                style={{ ...styles.filterInput, flex: 1, minWidth: '180px' }}
+                                                value={w.title}
+                                                onChange={(e) => setWidget(w.id, { title: e.target.value } as any)}
+                                                onClick={(e) => e.stopPropagation()}
+                                                placeholder="Title"
+                                              />
+                                            </div>
+
+                                            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const, alignItems: 'center' }}>
+                                              <span style={styles.tiny}>w</span>
+                                              <input
+                                                style={{ ...styles.filterInput, width: '78px' }}
+                                                inputMode="numeric"
+                                                value={String(w.layout?.w ?? (w.type === 'stat' ? 3 : 6))}
+                                                onChange={(e) =>
+                                                  setWidget(w.id, {
+                                                    layout: {
+                                                      x: w.layout?.x,
+                                                      y: w.layout?.y,
+                                                      w: clampInt(e.target.value || '6', 1, DASHBOARD_COLS, 6),
+                                                      h: clampInt(w.layout?.h ?? (w.type === 'stat' ? 1 : 2), 1, 50, 2),
+                                                    },
+                                                  } as any)
+                                                }
+                                                onClick={(e) => e.stopPropagation()}
+                                              />
+                                              <span style={styles.tiny}>h</span>
+                                              <input
+                                                style={{ ...styles.filterInput, width: '78px' }}
+                                                inputMode="numeric"
+                                                value={String(w.layout?.h ?? (w.type === 'stat' ? 1 : 2))}
+                                                onChange={(e) =>
+                                                  setWidget(w.id, {
+                                                    layout: {
+                                                      x: w.layout?.x,
+                                                      y: w.layout?.y,
+                                                      w: clampInt(w.layout?.w ?? (w.type === 'stat' ? 3 : 6), 1, DASHBOARD_COLS, 6),
+                                                      h: clampInt(e.target.value || '2', 1, 50, 2),
+                                                    },
+                                                  } as any)
+                                                }
+                                                onClick={(e) => e.stopPropagation()}
+                                              />
+
+                                              {w.type === 'stat' && (
+                                                <select
+                                                  style={styles.select}
+                                                  value={(w as any).metric}
+                                                  onChange={(e) => setWidget(w.id, { metric: e.target.value } as any)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                >
+                                                  <option value="events">events</option>
+                                                  <option value="errors">errors</option>
+                                                  <option value="error_rate">error_rate</option>
+                                                  <option value="unique_traces">unique_traces</option>
+                                                  <option value="unique_users">unique_users</option>
+                                                </select>
+                                              )}
+                                              {w.type === 'timeseries' && (
+                                                <select
+                                                  style={styles.select}
+                                                  value={(w as any).metric}
+                                                  onChange={(e) => setWidget(w.id, { metric: e.target.value } as any)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                >
+                                                  <option value="events">events</option>
+                                                  <option value="errors">errors</option>
+                                                  <option value="error_rate">error_rate</option>
+                                                </select>
+                                              )}
+                                              {w.type === 'bar' && (
+                                                <>
+                                                  <input
+                                                    style={{ ...styles.filterInput, width: '200px' }}
+                                                    value={(w as any).field}
+                                                    onChange={(e) => setWidget(w.id, { field: e.target.value } as any)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    placeholder="field (service_name, outcome, operation, user_id, foo.bar)"
+                                                  />
+                                                  <input
+                                                    style={{ ...styles.filterInput, width: '86px' }}
+                                                    inputMode="numeric"
+                                                    value={String((w as any).topN)}
+                                                    onChange={(e) => setWidget(w.id, { topN: Number(e.target.value || '8') } as any)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                  />
+                                                </>
+                                              )}
+                                              {w.type === 'histogram' && (
+                                                <>
+                                                  <input
+                                                    style={{ ...styles.filterInput, width: '200px' }}
+                                                    value={(w as any).field}
+                                                    onChange={(e) => setWidget(w.id, { field: e.target.value } as any)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    placeholder="numeric field (duration_ms, foo.ms)"
+                                                  />
+                                                  <input
+                                                    style={{ ...styles.filterInput, width: '86px' }}
+                                                    inputMode="numeric"
+                                                    value={String((w as any).bins)}
+                                                    onChange={(e) => setWidget(w.id, { bins: Number(e.target.value || '12') } as any)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                  />
+                                                </>
+                                              )}
+                                            </div>
+                                          </div>
+                                        )}
                                       </div>
-
-                                      {expanded && (
-                                        <div style={{ marginTop: '10px', display: 'grid', gap: '10px' }}>
-                                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const }}>
-                                            <select
-                                              style={styles.select}
-                                              value={w.type}
-                                              onChange={(e) => setWidgetType(e.target.value as any)}
-                                              onClick={(e) => e.stopPropagation()}
-                                            >
-                                              <option value="stat">stat</option>
-                                              <option value="timeseries">timeseries</option>
-                                              <option value="bar">bar</option>
-                                              <option value="histogram">histogram</option>
-                                            </select>
-                                            <input
-                                              style={{ ...styles.filterInput, flex: 1, minWidth: '180px' }}
-                                              value={w.title}
-                                              onChange={(e) => setWidget(w.id, { title: e.target.value } as any)}
-                                              onClick={(e) => e.stopPropagation()}
-                                              placeholder="Title"
-                                            />
-                                          </div>
-
-                                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const, alignItems: 'center' }}>
-                                            <span style={styles.tiny}>w</span>
-                                            <input
-                                              style={{ ...styles.filterInput, width: '78px' }}
-                                              inputMode="numeric"
-                                              value={String(w.layout?.w ?? (w.type === 'stat' ? 3 : 6))}
-                                              onChange={(e) =>
-                                                setWidget(w.id, {
-                                                  layout: {
-                                                    w: Number(e.target.value || '6'),
-                                                    h: w.layout?.h ?? (w.type === 'stat' ? 1 : 2),
-                                                  },
-                                                } as any)
-                                              }
-                                              onClick={(e) => e.stopPropagation()}
-                                            />
-                                            <span style={styles.tiny}>h</span>
-                                            <input
-                                              style={{ ...styles.filterInput, width: '78px' }}
-                                              inputMode="numeric"
-                                              value={String(w.layout?.h ?? (w.type === 'stat' ? 1 : 2))}
-                                              onChange={(e) =>
-                                                setWidget(w.id, {
-                                                  layout: {
-                                                    w: w.layout?.w ?? (w.type === 'stat' ? 3 : 6),
-                                                    h: Number(e.target.value || '2'),
-                                                  },
-                                                } as any)
-                                              }
-                                              onClick={(e) => e.stopPropagation()}
-                                            />
-
-                                            {w.type === 'stat' && (
-                                              <select
-                                                style={styles.select}
-                                                value={(w as any).metric}
-                                                onChange={(e) => setWidget(w.id, { metric: e.target.value } as any)}
-                                                onClick={(e) => e.stopPropagation()}
-                                              >
-                                                <option value="events">events</option>
-                                                <option value="errors">errors</option>
-                                                <option value="error_rate">error_rate</option>
-                                                <option value="unique_traces">unique_traces</option>
-                                                <option value="unique_users">unique_users</option>
-                                              </select>
-                                            )}
-                                            {w.type === 'timeseries' && (
-                                              <select
-                                                style={styles.select}
-                                                value={(w as any).metric}
-                                                onChange={(e) => setWidget(w.id, { metric: e.target.value } as any)}
-                                                onClick={(e) => e.stopPropagation()}
-                                              >
-                                                <option value="events">events</option>
-                                                <option value="errors">errors</option>
-                                                <option value="error_rate">error_rate</option>
-                                              </select>
-                                            )}
-                                            {w.type === 'bar' && (
-                                              <>
-                                                <input
-                                                  style={{ ...styles.filterInput, width: '200px' }}
-                                                  value={(w as any).field}
-                                                  onChange={(e) => setWidget(w.id, { field: e.target.value } as any)}
-                                                  onClick={(e) => e.stopPropagation()}
-                                                  placeholder="field (service_name, outcome, operation, user_id, foo.bar)"
-                                                />
-                                                <input
-                                                  style={{ ...styles.filterInput, width: '86px' }}
-                                                  inputMode="numeric"
-                                                  value={String((w as any).topN)}
-                                                  onChange={(e) => setWidget(w.id, { topN: Number(e.target.value || '8') } as any)}
-                                                  onClick={(e) => e.stopPropagation()}
-                                                />
-                                              </>
-                                            )}
-                                            {w.type === 'histogram' && (
-                                              <>
-                                                <input
-                                                  style={{ ...styles.filterInput, width: '200px' }}
-                                                  value={(w as any).field}
-                                                  onChange={(e) => setWidget(w.id, { field: e.target.value } as any)}
-                                                  onClick={(e) => e.stopPropagation()}
-                                                  placeholder="numeric field (duration_ms, foo.ms)"
-                                                />
-                                                <input
-                                                  style={{ ...styles.filterInput, width: '86px' }}
-                                                  inputMode="numeric"
-                                                  value={String((w as any).bins)}
-                                                  onChange={(e) => setWidget(w.id, { bins: Number(e.target.value || '12') } as any)}
-                                                  onClick={(e) => e.stopPropagation()}
-                                                />
-                                              </>
-                                            )}
-                                          </div>
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                })}
+                                    );
+                                  })}
+                                </div>
                               </div>
                             </div>
                           </div>
-                        </div>
+                        )}
 
                         <div style={{ ...styles.pane, overflow: 'hidden' }}>
                           <div style={styles.paneHeader}>
-                            <span style={styles.paneTitle}>Preview</span>
+                            <span style={styles.paneTitle}>
+                              {dashboardMode === 'edit' ? 'Preview' : 'Dashboard'}
+                            </span>
                             <span style={styles.tiny}>
                               last {effectiveDashboardSpec.sampleSize} (loaded {dashboardSample.length})
                             </span>
@@ -2827,71 +3134,121 @@ export default function App() {
                             {dashboardSample.length === 0 ? (
                               <div style={styles.empty}>No sample loaded. Click “Refresh Data” in the toolbar.</div>
                             ) : (
-                              <div style={styles.dashboardGrid}>
-                                {effectiveDashboardSpec.widgets.map((w) => {
-                                  const layoutW = Math.max(
-                                    1,
-                                    Math.min(12, w.layout?.w ?? (w.type === 'stat' ? 3 : 6))
-                                  );
-                                  const result = computeWidget(w as any, dashboardSample as any, effectiveDashboardSpec);
-
-                                  return (
-                                    <div key={w.id} style={{ ...styles.card, gridColumn: `span ${layoutW}` }}>
-                                      <div style={styles.cardHeader}>
-                                        <span style={styles.cardTitle}>{w.title}</span>
-                                        <span style={styles.tiny}>{w.type}</span>
-                                      </div>
-                                      <div style={styles.cardBody}>
-                                        {result.type === 'stat' ? (
-                                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                            <div style={{ fontSize: '30px', fontWeight: 800, color: '#fff' }}>
-                                              {result.data.value}
-                                            </div>
-                                            {result.data.sub && <div style={styles.tiny}>{result.data.sub}</div>}
-                                          </div>
-                                        ) : result.type === 'bar' ? (
-                                          (() => {
-                                            const max = Math.max(1, ...result.data.values);
-                                            return (
-                                              <div>
-                                                {result.data.labels.map((label, i) => {
-                                                  const v = result.data.values[i];
-                                                  const pct = (v / max) * 100;
-                                                  return (
-                                                    <div key={label} style={styles.barRow}>
-                                                      <div style={{ minWidth: 0 }}>
-                                                        <div style={styles.barLabel} title={label}>
-                                                          {label}
-                                                        </div>
-                                                        <div style={{ ...styles.barTrack, marginTop: '6px' }}>
-                                                          <div style={{ ...styles.barFill, width: `${pct}%` }} />
-                                                        </div>
-                                                      </div>
-                                                      <div style={styles.barValue}>{formatNumber(v)}</div>
-                                                    </div>
-                                                  );
-                                                })}
-                                              </div>
-                                            );
-                                          })()
-                                        ) : result.type === 'timeseries' ? (
-                                          <div>
-                                            {renderLineChart(
-                                              result.data.points,
-                                              result.data.unit === '%' ? '#f472b6' : '#6366f1'
+                              <div ref={dashboardContainer.containerRef} style={{ width: '100%' }}>
+                                <GridLayout
+                                  width={dashboardContainer.width}
+                                  layout={
+                                    effectiveDashboardSpec.widgets.map((w) => {
+                                      const defaults = defaultWidgetLayout(w);
+                                      const l: any = w.layout ?? {};
+                                      const ww = clampInt(l.w, 1, DASHBOARD_COLS, defaults.w);
+                                      const hh = clampInt(l.h, 1, 50, defaults.h);
+                                      const xx = clampInt(l.x, 0, Math.max(0, DASHBOARD_COLS - ww), 0);
+                                      const yy = clampInt(l.y, 0, 100_000, 0);
+                                      return { i: w.id, x: xx, y: yy, w: ww, h: hh };
+                                    }) as unknown as Layout
+                                  }
+                                  gridConfig={{
+                                    cols: DASHBOARD_COLS,
+                                    rowHeight: DASHBOARD_ROW_HEIGHT,
+                                    margin: [12, 12],
+                                    containerPadding: [0, 0],
+                                    maxRows: Infinity,
+                                  }}
+                                  dragConfig={{ enabled: dashboardMode === 'edit', bounded: false, handle: '.drag-handle', threshold: 3 }}
+                                  resizeConfig={{ enabled: dashboardMode === 'edit', handles: ['se'] }}
+                                  onLayoutChange={applyDashboardGridLayout}
+                                >
+                                  {effectiveDashboardSpec.widgets.map((w) => {
+                                    const result =
+                                      dashboardWidgetResults.get(w.id) ??
+                                      computeWidget(w as any, dashboardSample as any, effectiveDashboardSpec);
+                                    return (
+                                      <div key={w.id} style={styles.card}>
+                                        <div style={styles.cardHeader}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                                            {dashboardMode === 'edit' && (
+                                              <span
+                                                className="drag-handle"
+                                                title="Drag"
+                                                style={{
+                                                  cursor: 'grab',
+                                                  padding: '2px 6px',
+                                                  borderRadius: '6px',
+                                                  border: '1px solid #2a2a2a',
+                                                  color: '#888',
+                                                  fontSize: '12px',
+                                                  userSelect: 'none',
+                                                }}
+                                              >
+                                                ⋮⋮
+                                              </span>
                                             )}
-                                            <div style={styles.tiny}>Points: {result.data.points.length}</div>
+                                            <span
+                                              style={{
+                                                ...styles.cardTitle,
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap',
+                                              }}
+                                            >
+                                              {w.title}
+                                            </span>
                                           </div>
-                                        ) : (
-                                          <div>
-                                            {renderHistogram(result.data.bins, '#a78bfa')}
-                                            <div style={styles.tiny}>Bins: {result.data.bins.length}</div>
-                                          </div>
-                                        )}
+                                          <span style={styles.tiny}>{w.type}</span>
+                                        </div>
+                                        <div style={styles.cardBody}>
+                                          {result.type === 'stat' ? (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                              <div style={{ fontSize: '30px', fontWeight: 800, color: '#fff' }}>
+                                                {result.data.value}
+                                              </div>
+                                              {result.data.sub && <div style={styles.tiny}>{result.data.sub}</div>}
+                                            </div>
+                                          ) : result.type === 'bar' ? (
+                                            (() => {
+                                              const max = Math.max(1, ...result.data.values);
+                                              return (
+                                                <div>
+                                                  {result.data.labels.map((label: string, i: number) => {
+                                                    const v = result.data.values[i];
+                                                    const pct = (v / max) * 100;
+                                                    return (
+                                                      <div key={label} style={styles.barRow}>
+                                                        <div style={{ minWidth: 0 }}>
+                                                          <div style={styles.barLabel} title={label}>
+                                                            {label}
+                                                          </div>
+                                                          <div style={{ ...styles.barTrack, marginTop: '6px' }}>
+                                                            <div style={{ ...styles.barFill, width: `${pct}%` }} />
+                                                          </div>
+                                                        </div>
+                                                        <div style={styles.barValue}>{formatNumber(v)}</div>
+                                                      </div>
+                                                    );
+                                                  })}
+                                                </div>
+                                              );
+                                            })()
+                                          ) : result.type === 'timeseries' ? (
+                                            <div>
+                                              {renderLineChart(
+                                                result.data.points,
+                                                result.data.unit === '%' ? '#f472b6' : '#6366f1'
+                                              )}
+                                              <div style={styles.tiny}>Points: {result.data.points.length}</div>
+                                            </div>
+                                          ) : (
+                                            <div>
+                                              {renderHistogram(result.data.bins, '#a78bfa')}
+                                              <div style={styles.tiny}>Bins: {result.data.bins.length}</div>
+                                            </div>
+                                          )}
+                                        </div>
                                       </div>
-                                    </div>
-                                  );
-                                })}
+                                    );
+                                  })}
+                                </GridLayout>
                               </div>
                             )}
                           </div>
@@ -2899,6 +3256,139 @@ export default function App() {
                       </div>
                     </>
                   )}
+                </div>
+              </div>
+            </div>
+          ) : tab === 'settings' ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+              <div style={styles.pane}>
+                <div style={styles.paneHeader}>
+                  <span style={styles.paneTitle}>Drop</span>
+                  <span style={styles.tiny}>
+                    Active: {drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? '-' : `#${dropId}`)}
+                  </span>
+                </div>
+                <div style={styles.paneBody}>
+                  <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px' }}>
+                    Drops isolate telemetry streams (e.g., staging vs production).
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'end' }}>
+                    <div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Create new drop</div>
+                      <input
+                        style={styles.filterInput}
+                        placeholder="Drop name (e.g., production)"
+                        value={newDropName}
+                        onChange={(e) => setNewDropName(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleCreateDrop()}
+                      />
+                    </div>
+                    <button style={styles.button} onClick={handleCreateDrop} disabled={!newDropName.trim()}>
+                      Create
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
+                    <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Ingest routing</div>
+                    <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.5 }}>
+                      Use header <span style={styles.mono}>X-Raphael-Drop</span> or query <span style={styles.mono}>?drop=</span>.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={styles.pane}>
+                <div style={styles.paneHeader}>
+                  <span style={styles.paneTitle}>Retention</span>
+                  <span style={styles.tiny}>Per-drop auto-truncation</span>
+                </div>
+                <div style={styles.paneBody}>
+                  <div style={{ color: '#888', fontSize: '13px', marginBottom: '14px' }}>
+                    Set days to keep per drop (0 disables). Saving triggers an immediate prune.
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                    <div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Traces (days)</div>
+                      <input
+                        style={styles.filterInput}
+                        inputMode="numeric"
+                        value={retentionTracesDays}
+                        onChange={(e) => setRetentionTracesDays(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Wide Events (days)</div>
+                      <input
+                        style={styles.filterInput}
+                        inputMode="numeric"
+                        value={retentionEventsDays}
+                        onChange={(e) => setRetentionEventsDays(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '14px' }}>
+                    <button style={styles.button} onClick={handleSaveRetention} disabled={dropId === null}>
+                      Save retention
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ ...styles.pane, gridColumn: '1 / -1' }}>
+                <div style={styles.paneHeader}>
+                  <span style={styles.paneTitle}>Integrations</span>
+                  <span style={styles.tiny}>Optional</span>
+                </div>
+                <div style={styles.paneBody}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                    <div>
+                      <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6, marginBottom: '10px' }}>
+                        Configure OpenRouter for AI dashboard generation. Values are stored locally (API key is encrypted at rest).
+                      </div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Model</div>
+                      <input
+                        style={styles.filterInput}
+                        placeholder="openai/gpt-4o-mini"
+                        value={openRouterModel}
+                        onChange={(e) => setOpenRouterModel(e.target.value)}
+                      />
+                      <div style={{ ...styles.metaLabel, marginTop: '12px', marginBottom: '6px' }}>API key</div>
+                      <input
+                        style={styles.filterInput}
+                        type="password"
+                        placeholder={openRouterApiKeySet ? '•••••••• (set)' : 'Paste OPENROUTER_API_KEY'}
+                        value={openRouterApiKey}
+                        onChange={(e) => setOpenRouterApiKey(e.target.value)}
+                      />
+                      <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
+                        {openRouterApiKeySet && (
+                          <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={clearOpenRouterKey} disabled={openRouterSaving}>
+                            Clear key
+                          </button>
+                        )}
+                        <button style={styles.button} onClick={saveOpenRouterSettings} disabled={openRouterSaving}>
+                          {openRouterSaving ? 'Saving…' : 'Save'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div style={styles.pill}>
+                        Status:
+                        <span style={{ color: '#fff' }}>{openRouterApiKeySet ? 'API key set' : 'No API key'}</span>
+                      </div>
+                      <div style={{ marginTop: '12px', color: '#888', fontSize: '13px', lineHeight: 1.6 }}>
+                        Notes:
+                        <ul style={{ marginTop: '8px', paddingLeft: '18px', color: '#aaa' }}>
+                          <li>Key is never returned to the browser once saved.</li>
+                          <li>You can still override via server env vars if you want.</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2998,90 +3488,6 @@ export default function App() {
         </div>
       </main>
 
-      {showNewDrop && (
-        <div style={styles.modal} onClick={() => setShowNewDrop(false)}>
-          <div style={styles.modalSmallContent} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalHeader}>
-              <span style={styles.modalTitle}>Create Drop</span>
-              <div style={styles.modalActions}>
-                <button style={styles.button} onClick={() => setShowNewDrop(false)}>
-                  Close
-                </button>
-              </div>
-            </div>
-            <div style={styles.modalBody}>
-              <div style={{ color: '#888', fontSize: '13px', marginBottom: '10px' }}>
-                Drops isolate logs from different environments (e.g., staging vs production).
-              </div>
-              <input
-                style={styles.filterInput}
-                placeholder="Drop name (e.g., production)"
-                value={newDropName}
-                onChange={(e) => setNewDropName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleCreateDrop()}
-                autoFocus
-              />
-              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
-                <button style={styles.button} onClick={() => setShowNewDrop(false)}>
-                  Cancel
-                </button>
-                <button style={styles.button} onClick={handleCreateDrop} disabled={!newDropName.trim()}>
-                  Create
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showRetention && (
-        <div style={styles.modal} onClick={() => setShowRetention(false)}>
-          <div style={styles.modalSmallContent} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalHeader}>
-              <span style={styles.modalTitle}>Retention Rules</span>
-              <div style={styles.modalActions}>
-                <button style={styles.button} onClick={() => setShowRetention(false)}>
-                  Close
-                </button>
-              </div>
-            </div>
-            <div style={styles.modalBody}>
-              <div style={{ color: '#888', fontSize: '13px', marginBottom: '16px' }}>
-                Auto-truncation prevents unbounded growth. Set days to keep per drop (0 disables).
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Traces (days)</div>
-                  <input
-                    style={styles.filterInput}
-                    inputMode="numeric"
-                    value={retentionTracesDays}
-                    onChange={(e) => setRetentionTracesDays(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Wide Events (days)</div>
-                  <input
-                    style={styles.filterInput}
-                    inputMode="numeric"
-                    value={retentionEventsDays}
-                    onChange={(e) => setRetentionEventsDays(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '16px' }}>
-                <button style={styles.button} onClick={() => setShowRetention(false)}>
-                  Cancel
-                </button>
-                <button style={styles.button} onClick={handleSaveRetention} disabled={dropId === null}>
-                  Save
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showNewDashboard && (
         <div style={styles.modal} onClick={() => setShowNewDashboard(false)}>
           <div style={styles.modalSmallContent} onClick={(e) => e.stopPropagation()}>
@@ -3149,8 +3555,7 @@ export default function App() {
               </div>
               {generateUseAi && (
                 <div style={{ ...styles.tiny, marginTop: '10px' }}>
-                  Requires server env var <span style={styles.mono}>OPENROUTER_API_KEY</span> (optional{' '}
-                  <span style={styles.mono}>OPENROUTER_MODEL</span>).
+                  Configure OpenRouter in the <span style={styles.mono}>Settings</span> tab (or via server env vars).
                 </div>
               )}
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '16px' }}>

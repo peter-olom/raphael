@@ -28,6 +28,12 @@ db.exec(`
     created_at INTEGER DEFAULT (unixepoch() * 1000)
   );
 
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER DEFAULT (unixepoch() * 1000)
+  );
+
   CREATE TABLE IF NOT EXISTS drop_retention (
     drop_id INTEGER PRIMARY KEY,
     traces_retention_ms INTEGER,
@@ -115,6 +121,8 @@ ensureRetentionRow(DEFAULT_DROP_ID);
 
 // Indexes that depend on drop_id (must run after migrations)
 db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_settings_updated ON app_settings(updated_at DESC);
+
   CREATE INDEX IF NOT EXISTS idx_dashboards_drop_updated ON dashboards(drop_id, updated_at DESC);
 
   CREATE INDEX IF NOT EXISTS idx_traces_drop_created ON traces(drop_id, created_at DESC);
@@ -497,4 +505,25 @@ export function updateDashboard(dropId: number, dashboardId: number, name?: stri
 
 export function deleteDashboard(dropId: number, dashboardId: number) {
   return db.prepare(`DELETE FROM dashboards WHERE drop_id = ? AND id = ?`).run(dropId, dashboardId).changes > 0;
+}
+
+export function getAppSetting(key: string): string | undefined {
+  const row = db.prepare(`SELECT value FROM app_settings WHERE key = ?`).get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setAppSetting(key: string, value: string) {
+  db.prepare(
+    `
+      INSERT INTO app_settings (key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = (unixepoch() * 1000)
+    `
+  ).run(key, value);
+}
+
+export function deleteAppSetting(key: string) {
+  db.prepare(`DELETE FROM app_settings WHERE key = ?`).run(key);
 }

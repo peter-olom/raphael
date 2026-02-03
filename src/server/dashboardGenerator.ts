@@ -42,7 +42,7 @@ export type WidgetSpec =
       type: 'stat';
       title: string;
       metric: 'events' | 'errors' | 'error_rate' | 'unique_traces' | 'unique_users';
-      layout?: { w: number; h: number };
+      layout?: { x?: number; y?: number; w: number; h: number };
     }
   | {
       id: string;
@@ -50,14 +50,14 @@ export type WidgetSpec =
       title: string;
       field: string;
       topN: number;
-      layout?: { w: number; h: number };
+      layout?: { x?: number; y?: number; w: number; h: number };
     }
   | {
       id: string;
       type: 'timeseries';
       title: string;
       metric: 'events' | 'errors' | 'error_rate';
-      layout?: { w: number; h: number };
+      layout?: { x?: number; y?: number; w: number; h: number };
     }
   | {
       id: string;
@@ -65,7 +65,7 @@ export type WidgetSpec =
       title: string;
       field: string;
       bins: number;
-      layout?: { w: number; h: number };
+      layout?: { x?: number; y?: number; w: number; h: number };
     };
 
 function safeParseAttributes(raw: string): Record<string, unknown> {
@@ -205,12 +205,12 @@ export function generateDashboardHeuristic(dropName: string, sampleSize: number,
   const duration = get('duration_ms');
 
   const widgets: WidgetSpec[] = [
-    { id: uuid('stat'), type: 'stat', title: 'Events', metric: 'events', layout: { w: 3, h: 1 } },
-    { id: uuid('stat'), type: 'stat', title: 'Errors', metric: 'errors', layout: { w: 3, h: 1 } },
-    { id: uuid('stat'), type: 'stat', title: 'Error rate', metric: 'error_rate', layout: { w: 3, h: 1 } },
-    { id: uuid('stat'), type: 'stat', title: 'Unique users', metric: 'unique_users', layout: { w: 3, h: 1 } },
-    { id: uuid('ts'), type: 'timeseries', title: 'Events over time', metric: 'events', layout: { w: 6, h: 2 } },
-    { id: uuid('ts'), type: 'timeseries', title: 'Errors over time', metric: 'errors', layout: { w: 6, h: 2 } },
+    { id: uuid('stat'), type: 'stat', title: 'Events', metric: 'events', layout: { x: 0, y: 0, w: 3, h: 1 } },
+    { id: uuid('stat'), type: 'stat', title: 'Errors', metric: 'errors', layout: { x: 3, y: 0, w: 3, h: 1 } },
+    { id: uuid('stat'), type: 'stat', title: 'Error rate', metric: 'error_rate', layout: { x: 6, y: 0, w: 3, h: 1 } },
+    { id: uuid('stat'), type: 'stat', title: 'Unique users', metric: 'unique_users', layout: { x: 9, y: 0, w: 3, h: 1 } },
+    { id: uuid('ts'), type: 'timeseries', title: 'Events over time', metric: 'events', layout: { x: 0, y: 1, w: 6, h: 2 } },
+    { id: uuid('ts'), type: 'timeseries', title: 'Errors over time', metric: 'errors', layout: { x: 6, y: 1, w: 6, h: 2 } },
   ];
 
   if (service && !service.highCardinality) {
@@ -251,6 +251,28 @@ export function generateDashboardHeuristic(dropName: string, sampleSize: number,
     });
   }
 
+  // Fill x/y for any widgets added above (simple left-to-right packing).
+  const COLS = 12;
+  let cursorX = 0;
+  let cursorY = 3; // rows 0..2 used by stats + 2x timeseries
+  let rowH = 2;
+  for (const w of widgets) {
+    const layout = (w as any).layout;
+    if (!layout) continue;
+    if (layout.x !== undefined && layout.y !== undefined) continue;
+    const ww = Math.max(1, Math.min(COLS, Number(layout.w ?? 6)));
+    const hh = Math.max(1, Number(layout.h ?? 2));
+    if (cursorX + ww > COLS) {
+      cursorX = 0;
+      cursorY += rowH;
+      rowH = 1;
+    }
+    layout.x = cursorX;
+    layout.y = cursorY;
+    cursorX += ww;
+    rowH = Math.max(rowH, hh);
+  }
+
   return {
     version: 1,
     name: `Auto dashboard (${dropName})`,
@@ -278,6 +300,7 @@ export async function generateDashboardWithOpenRouter(params: {
       {
         id: 'string',
         type: 'stat|bar|timeseries|histogram',
+        layout: { x: 'number', y: 'number', w: 'number', h: 'number' },
       },
     ],
   };
@@ -290,10 +313,10 @@ Return ONLY valid JSON matching this shape: ${JSON.stringify(schemaHint)}
 
 Widget rules:
 - Use only these widget types: stat, bar, timeseries, histogram
-- bar widgets: {id,type,title,field,topN,layout{w,h}}
-- timeseries: {id,type,title,metric,layout{w,h}} where metric is events|errors|error_rate
-- stat: {id,type,title,metric,layout{w,h}} where metric is events|errors|error_rate|unique_traces|unique_users
-- histogram: {id,type,title,field,bins,layout{w,h}}
+- bar widgets: {id,type,title,field,topN,layout{x,y,w,h}}
+- timeseries: {id,type,title,metric,layout{x,y,w,h}} where metric is events|errors|error_rate
+- stat: {id,type,title,metric,layout{x,y,w,h}} where metric is events|errors|error_rate|unique_traces|unique_users
+- histogram: {id,type,title,field,bins,layout{x,y,w,h}}
 - Prefer fields with low/moderate cardinality for bar charts; avoid high-cardinality fields unless showing unique counts.
 
 Field profiles:

@@ -108,7 +108,7 @@ curl -X POST http://localhost:6274/v1/events \
 
 - [x] **Smart Filtering** - Refine log filter UX with auto-detection of high-cardinality fields (50+ entries) to generate filter options, while preserving selected filters as logs stream in
 - [x] **Enhanced Viewers** - Code editor-style JSON view for traces and events with collapsible blocks
-- [ ] **Dashboards** - One-click dashboard creation from logs with full drag, drop, and resize support (in progress: dashboard generator + UI builder)
+- [x] **Dashboards** - One-click dashboard creation from logs with full drag, drop, and resize support
 - [x] **Drops** - Workspace/container separation layer to isolate logs from different environments (e.g., staging vs production)
 - [x] **Auto-Truncation Rules** - Minimal retention rules per Drop to prevent unbounded growth (e.g., "Drop A: traces 3d, events 7d")
 - [ ] **Auth Layer** - Optional authentication via BetterAuth for hosted deployments, with API key generation (R/W permissions per Drop per endpoint)
@@ -119,11 +119,12 @@ curl -X POST http://localhost:6274/v1/events \
 - Ingestion endpoints support selecting a Drop by name via the `X-Raphael-Drop` header (or `?drop=` query param).
 - Each Drop has independent retention rules (defaults: traces **3 days**, events **7 days**) configurable in the UI.
 
-## Dashboards (Preview)
+## Dashboards
 
 - Dashboards are stored **per Drop** and can be edited in the UI builder.
 - “Generate” builds a dashboard by studying field cardinality in the **last N wide events**.
-- Optional AI generator: set `OPENROUTER_API_KEY` (and optionally `OPENROUTER_MODEL`) and enable “Use AI” in the generator modal.
+- Edit mode supports **drag / drop / resize**; View mode hides config knobs.
+- Optional AI generator: set OpenRouter key + model in **Settings** (or via `OPENROUTER_API_KEY` / `OPENROUTER_MODEL`) and enable “Use AI” in the generator modal.
 
 ## License
 

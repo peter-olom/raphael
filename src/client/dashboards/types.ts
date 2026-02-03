@@ -6,7 +6,7 @@ export type DashboardSpecV1 = {
   widgets: WidgetSpec[];
 };
 
-export type WidgetLayout = { w: number; h: number };
+export type WidgetLayout = { x?: number; y?: number; w: number; h: number };
 
 export type WidgetSpec =
   | {
@@ -48,4 +48,3 @@ export type DashboardRow = {
   created_at: number;
   updated_at: number;
 };
-

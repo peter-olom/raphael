@@ -4,6 +4,9 @@ import {
   createDrop,
   getDropById,
   getDropRetention,
+  getAppSetting,
+  setAppSetting,
+  deleteAppSetting,
   listDashboards,
   getDashboard,
   createDashboard,
@@ -23,6 +26,7 @@ import {
   setDropRetentionMs,
 } from '../db/sqlite.js';
 import { generateDashboardHeuristic, generateDashboardWithOpenRouter, profileWideEvents } from '../dashboardGenerator.js';
+import { decryptSecret, encryptSecret } from '../secrets.js';
 
 export const apiRouter = Router();
 
@@ -222,9 +226,11 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
 
   try {
     if (useAi) {
-      const apiKey = process.env.OPENROUTER_API_KEY;
+      const storedKey = getAppSetting('openrouter_api_key');
+      const apiKey = storedKey ? decryptSecret(storedKey) : process.env.OPENROUTER_API_KEY;
       if (!apiKey) return res.status(400).json({ error: 'OPENROUTER_API_KEY is not set' });
-      const model = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+      const storedModel = getAppSetting('openrouter_model');
+      const model = storedModel || process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
       const spec = await generateDashboardWithOpenRouter({ apiKey, model, dropName, sampleSize: sample.length, profiles });
       return res.json({ spec, profiles });
     }
@@ -234,4 +240,38 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
   } catch (error) {
     return res.status(500).json({ error: (error as Error).message || 'Failed to generate dashboard' });
   }
+});
+
+// Settings: OpenRouter (global)
+apiRouter.get('/settings/openrouter', (_req: Request, res: Response) => {
+  const model = getAppSetting('openrouter_model') || process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+  const storedKey = getAppSetting('openrouter_api_key');
+  res.json({ model, api_key_set: Boolean(storedKey || process.env.OPENROUTER_API_KEY) });
+});
+
+apiRouter.put('/settings/openrouter', (req: Request, res: Response) => {
+  const apiKeyRaw = req.body?.api_key;
+  const modelRaw = req.body?.model;
+
+  if (apiKeyRaw !== undefined) {
+    const apiKey = (apiKeyRaw ?? '').toString().trim();
+    if (!apiKey) {
+      deleteAppSetting('openrouter_api_key');
+    } else {
+      setAppSetting('openrouter_api_key', encryptSecret(apiKey));
+    }
+  }
+
+  if (modelRaw !== undefined) {
+    const model = (modelRaw ?? '').toString().trim();
+    if (!model) {
+      deleteAppSetting('openrouter_model');
+    } else {
+      setAppSetting('openrouter_model', model);
+    }
+  }
+
+  const model = getAppSetting('openrouter_model') || process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+  const storedKey = getAppSetting('openrouter_api_key');
+  res.json({ success: true, model, api_key_set: Boolean(storedKey || process.env.OPENROUTER_API_KEY) });
 });
