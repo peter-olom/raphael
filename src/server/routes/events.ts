@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { insertWideEvent } from '../db/sqlite.js';
+import { ensureDrop, insertWideEventRow } from '../db/sqlite.js';
 import { broadcast } from '../websocket.js';
 
 export const eventsRouter = Router();
@@ -20,6 +20,7 @@ interface WideEvent {
 // Wide events receiver - accepts array of events
 eventsRouter.post('/v1/events', (req: Request, res: Response) => {
   try {
+    const dropId = ensureDrop((req.header('x-raphael-drop') || (req.query.drop as string) || '').toString());
     const events = Array.isArray(req.body) ? req.body : [req.body];
     const insertedEvents: unknown[] = [];
 
@@ -35,7 +36,8 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
       const rpcCallCount = event['count.rpc_calls'] || 0;
       const attributes = JSON.stringify(event);
 
-      insertWideEvent.run(
+      insertWideEventRow(
+        dropId,
         traceId,
         serviceName,
         operationType,
@@ -49,6 +51,7 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
       );
 
       insertedEvents.push({
+        drop_id: dropId,
         trace_id: traceId,
         service_name: serviceName,
         operation_type: operationType,
@@ -65,7 +68,7 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
 
     // Broadcast to connected clients
     if (insertedEvents.length > 0) {
-      broadcast({ type: 'wide_events', data: insertedEvents });
+      broadcast({ type: 'wide_events', drop_id: dropId, data: insertedEvents }, dropId);
     }
 
     res.status(200).json({ received: events.length });
@@ -78,6 +81,7 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
 // Also support OTLP logs format (for compatibility with existing WideEventEmitter)
 eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
   try {
+    const dropId = ensureDrop((req.header('x-raphael-drop') || (req.query.drop as string) || '').toString());
     const body = req.body;
     const insertedEvents: unknown[] = [];
 
@@ -100,7 +104,8 @@ eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
               const errorCount = attrs['error_count'] as number || 0;
               const rpcCallCount = attrs['count.rpc_calls'] as number || 0;
 
-              insertWideEvent.run(
+              insertWideEventRow(
+                dropId,
                 traceId,
                 serviceName,
                 operationType,
@@ -114,6 +119,7 @@ eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
               );
 
               insertedEvents.push({
+                drop_id: dropId,
                 trace_id: traceId,
                 service_name: serviceName,
                 operation_type: operationType,
@@ -134,7 +140,7 @@ eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
 
     // Broadcast to connected clients
     if (insertedEvents.length > 0) {
-      broadcast({ type: 'wide_events', data: insertedEvents });
+      broadcast({ type: 'wide_events', drop_id: dropId, data: insertedEvents }, dropId);
     }
 
     res.status(200).json({ partialSuccess: {} });

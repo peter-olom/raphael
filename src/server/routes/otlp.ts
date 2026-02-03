@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { insertTrace } from '../db/sqlite.js';
+import { ensureDrop, insertTraceRow } from '../db/sqlite.js';
 import { broadcast } from '../websocket.js';
 
 export const otlpRouter = Router();
@@ -36,6 +36,7 @@ interface OtlpTraceRequest {
 otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
   try {
     const body = req.body as OtlpTraceRequest;
+    const dropId = ensureDrop((req.header('x-raphael-drop') || (req.query.drop as string) || '').toString());
 
     if (!body.resourceSpans) {
       res.status(200).json({ partialSuccess: {} });
@@ -58,8 +59,10 @@ otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
           const durationMs = endTime ? endTime - startTime : null;
           const status = span.status?.code === 2 ? 'error' : 'ok';
           const attributes = JSON.stringify(flattenAttributes(span.attributes || []));
+          const createdAt = Date.now();
 
-          insertTrace.run(
+          insertTraceRow(
+            dropId,
             traceId,
             spanId,
             parentSpanId,
@@ -73,6 +76,7 @@ otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
           );
 
           const trace = {
+            drop_id: dropId,
             trace_id: traceId,
             span_id: spanId,
             parent_span_id: parentSpanId,
@@ -83,6 +87,7 @@ otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
             duration_ms: durationMs,
             status,
             attributes,
+            created_at: createdAt,
           };
 
           insertedTraces.push(trace);
@@ -92,7 +97,7 @@ otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
 
     // Broadcast to connected clients
     if (insertedTraces.length > 0) {
-      broadcast({ type: 'traces', data: insertedTraces });
+      broadcast({ type: 'traces', drop_id: dropId, data: insertedTraces }, dropId);
     }
 
     res.status(200).json({ partialSuccess: {} });

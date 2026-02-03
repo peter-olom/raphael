@@ -106,12 +106,18 @@ curl -X POST http://localhost:6274/v1/events \
 
 ## Roadmap
 
-- [ ] **Smart Filtering** - Refine log filter UX with auto-detection of high-cardinality fields (50+ entries) to generate filter options, while preserving selected filters as logs stream in
-- [ ] **Enhanced Viewers** - Code editor-style JSON view for traces and events with collapsible blocks
+- [x] **Smart Filtering** - Refine log filter UX with auto-detection of high-cardinality fields (50+ entries) to generate filter options, while preserving selected filters as logs stream in
+- [x] **Enhanced Viewers** - Code editor-style JSON view for traces and events with collapsible blocks
 - [ ] **Dashboards** - One-click dashboard creation from logs with full drag, drop, and resize support
-- [ ] **Drops** - Workspace/container separation layer to isolate logs from different environments (e.g., staging vs production)
-- [ ] **Auto-Truncation Rules** - Minimal retention rules per Drop to prevent unbounded growth (e.g., "Drop A: traces 3d, events 7d")
+- [x] **Drops** - Workspace/container separation layer to isolate logs from different environments (e.g., staging vs production)
+- [x] **Auto-Truncation Rules** - Minimal retention rules per Drop to prevent unbounded growth (e.g., "Drop A: traces 3d, events 7d")
 - [ ] **Auth Layer** - Optional authentication via BetterAuth for hosted deployments, with API key generation (R/W permissions per Drop per endpoint)
+
+## Drops & Retention
+
+- **Drops** isolate telemetry streams (e.g., `staging` vs `production`). Select/create Drops in the UI.
+- Ingestion endpoints support selecting a Drop by name via the `X-Raphael-Drop` header (or `?drop=` query param).
+- Each Drop has independent retention rules (defaults: traces **3 days**, events **7 days**) configurable in the UI.
 
 ## License
 

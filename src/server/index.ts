@@ -8,6 +8,7 @@ import { otlpRouter } from './routes/otlp.js';
 import { eventsRouter } from './routes/events.js';
 import { apiRouter } from './routes/api.js';
 import { setupWebSocket } from './websocket.js';
+import { pruneByRetention } from './db/sqlite.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,6 +40,20 @@ app.get('*', (req, res, next) => {
 
 // Setup WebSocket
 setupWebSocket(server);
+
+// Auto-truncation (retention rules per Drop)
+try {
+  pruneByRetention();
+  setInterval(() => {
+    try {
+      pruneByRetention();
+    } catch (error) {
+      console.error('Retention pruning failed:', error);
+    }
+  }, 60_000);
+} catch (error) {
+  console.error('Initial retention pruning failed:', error);
+}
 
 const PORT = process.env.PORT || 6274;
 
