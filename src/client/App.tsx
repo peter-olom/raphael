@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import type { DashboardRow, DashboardSpecV1, WidgetSpec } from './dashboards/types';
+import { computeWidget, parseDashboardSpec } from './dashboards/render';
 
 interface Trace {
   id: number;
@@ -46,7 +48,7 @@ interface Drop {
   events_retention_ms: number | null;
 }
 
-type Tab = 'events' | 'traces';
+type Tab = 'events' | 'traces' | 'dashboards';
 
 const styles = {
   container: {
@@ -518,6 +520,70 @@ const styles = {
     height: '100%',
     background: '#6366f1',
   },
+  dashboardGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(12, 1fr)',
+    gap: '12px',
+    alignItems: 'stretch',
+  },
+  card: {
+    background: '#141414',
+    border: '1px solid #333',
+    borderRadius: '12px',
+    overflow: 'hidden',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    minHeight: '140px',
+  },
+  cardHeader: {
+    padding: '10px 12px',
+    borderBottom: '1px solid #333',
+    background: '#101010',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '10px',
+  },
+  cardTitle: {
+    fontSize: '12px',
+    fontWeight: 700,
+    color: '#e5e7eb',
+    textTransform: 'uppercase' as const,
+  },
+  cardBody: {
+    padding: '12px',
+    flex: 1,
+    overflow: 'auto',
+  },
+  tiny: {
+    fontSize: '11px',
+    color: '#888',
+  },
+  barRow: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 70px',
+    gap: '10px',
+    alignItems: 'center',
+    padding: '6px 0',
+  },
+  barLabel: {
+    fontFamily: 'Monaco, Consolas, monospace',
+    fontSize: '12px',
+    color: '#e5e7eb',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+  },
+  barValue: {
+    textAlign: 'right' as const,
+    color: '#cbd5e1',
+    fontSize: '12px',
+  },
+  chart: {
+    width: '100%',
+    height: '110px',
+    display: 'block',
+  },
   empty: {
     textAlign: 'center' as const,
     padding: '48px',
@@ -557,6 +623,10 @@ function formatDuration(ms: number | null): string {
   if (ms === null || ms === undefined) return '-';
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function formatNumber(n: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n);
 }
 
 function truncate(str: string | null | undefined, len: number): string {
@@ -1454,7 +1524,17 @@ function TraceDetailModal({
 }
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('events');
+  const parseTab = (value: string | null): Tab | null => {
+    if (value === 'events' || value === 'traces' || value === 'dashboards') return value;
+    return null;
+  };
+
+  const initialTab: Tab =
+    parseTab(new URLSearchParams(window.location.search).get('tab')) ??
+    parseTab(window.location.hash.replace(/^#/, '')) ??
+    'events';
+
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [events, setEvents] = useState<WideEvent[]>([]);
   const [stats, setStats] = useState<Stats>({ traces: 0, wideEvents: 0, errors: 0 });
@@ -1471,9 +1551,43 @@ export default function App() {
   const [retentionTracesDays, setRetentionTracesDays] = useState<string>('3');
   const [retentionEventsDays, setRetentionEventsDays] = useState<string>('7');
   const [selected, setSelected] = useState<Selected | null>(null);
+  const [dashboards, setDashboards] = useState<DashboardRow[]>([]);
+  const [dashboardSelectedId, setDashboardSelectedId] = useState<number | null>(null);
+  const [dashboardSpec, setDashboardSpec] = useState<DashboardSpecV1 | null>(null);
+  const [dashboardName, setDashboardName] = useState('');
+  const [dashboardSample, setDashboardSample] = useState<WideEvent[]>([]);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardEditingWidgetId, setDashboardEditingWidgetId] = useState<string | null>(null);
+  const [showNewDashboard, setShowNewDashboard] = useState(false);
+  const [newDashboardName, setNewDashboardName] = useState('My Dashboard');
+  const [showGenerateDashboard, setShowGenerateDashboard] = useState(false);
+  const [generateLimit, setGenerateLimit] = useState<string>('2000');
+  const [generateUseAi, setGenerateUseAi] = useState(false);
+  const [appToast, setAppToast] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Persist tab selection per browser tab via URL (refresh-safe).
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('tab') !== tab) {
+      url.searchParams.set('tab', tab);
+      window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    }
+  }, [tab]);
+
+  // Support back/forward navigation if the user edits the URL or uses history.
+  useEffect(() => {
+    const onPopState = () => {
+      const next =
+        parseTab(new URLSearchParams(window.location.search).get('tab')) ??
+        parseTab(window.location.hash.replace(/^#/, ''));
+      if (next && next !== tab) setTab(next);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [tab]);
 
   const fetchData = useCallback(async () => {
     if (dropIdRef.current === null) return;
@@ -1508,6 +1622,23 @@ export default function App() {
     }
   }, []);
 
+  const fetchDashboards = useCallback(async () => {
+    if (dropIdRef.current === null) return;
+    try {
+      const res = await fetch(`/api/dashboards?dropId=${dropIdRef.current}`);
+      const rows = (await res.json()) as DashboardRow[];
+      setDashboards(rows);
+      if (dashboardSelectedId !== null && !rows.some((d) => d.id === dashboardSelectedId)) {
+        setDashboardSelectedId(null);
+        setDashboardSpec(null);
+        setDashboardName('');
+        setDashboardSample([]);
+      }
+    } catch (error) {
+      console.error('Failed to fetch dashboards:', error);
+    }
+  }, [dashboardSelectedId]);
+
   const handleSearch = useCallback(async () => {
     if (!search.trim()) {
       fetchData();
@@ -1515,6 +1646,7 @@ export default function App() {
     }
     try {
       if (dropIdRef.current === null) return;
+      if (tab === 'dashboards') return;
       if (tab === 'traces') {
         const res = await fetch(
           `/api/search/traces?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}`
@@ -1567,8 +1699,15 @@ export default function App() {
 
     setSelected(null);
     fetchData();
+    fetchDashboards();
     subscribeWs(dropId);
-  }, [dropId, drops, fetchData, subscribeWs]);
+  }, [dropId, drops, fetchData, subscribeWs, fetchDashboards]);
+
+  useEffect(() => {
+    if (tab !== 'dashboards') return;
+    if (!dashboardSpec) return;
+    void ensureDashboardDataLoaded();
+  }, [tab, dashboardSpec]);
 
   useEffect(() => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1636,6 +1775,29 @@ export default function App() {
 
   const visibleEvents = applyFilters('events', events, eventFilters, search);
   const visibleTraces = applyFilters('traces', traces, traceFilters, search);
+
+  const effectiveDashboardSpec: DashboardSpecV1 | null = dashboardSpec
+    ? {
+        ...dashboardSpec,
+        name: dashboardName || dashboardSpec.name,
+        sampleSize: Math.max(100, Math.min(20_000, Number(dashboardSpec.sampleSize ?? 2000))),
+        bucketSeconds: Math.max(10, Math.min(3600, Number(dashboardSpec.bucketSeconds ?? 60))),
+      }
+    : null;
+
+  useEffect(() => {
+    if (!effectiveDashboardSpec) {
+      setDashboardEditingWidgetId(null);
+      return;
+    }
+    if (
+      dashboardEditingWidgetId &&
+      effectiveDashboardSpec.widgets.some((w) => w.id === dashboardEditingWidgetId)
+    ) {
+      return;
+    }
+    setDashboardEditingWidgetId(effectiveDashboardSpec.widgets[0]?.id ?? null);
+  }, [effectiveDashboardSpec, dashboardEditingWidgetId]);
 
   const statsForTab = computeFieldStats(tab, tab === 'events' ? events : traces, Object.keys(activeFilters));
   const suggestedKeys = statsForTab.slice(0, 8).map((s) => s.key);
@@ -1728,6 +1890,270 @@ export default function App() {
     }
   };
 
+  const flashToast = (message: string) => {
+    setAppToast(message);
+    setTimeout(() => setAppToast(null), 2000);
+  };
+
+  const uuid = (prefix = 'w') =>
+    `${prefix}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 8)}`;
+
+  const loadDashboard = async (id: number) => {
+    if (dropIdRef.current === null) return;
+    setDashboardLoading(true);
+    try {
+      const res = await fetch(`/api/dashboards/${id}?dropId=${dropIdRef.current}`);
+      if (!res.ok) throw new Error('Failed to load dashboard');
+      const row = (await res.json()) as DashboardRow;
+      setDashboardSelectedId(row.id);
+      setDashboardName(row.name);
+      const spec = parseDashboardSpec(row.spec_json);
+      setDashboardSpec(spec);
+      setDashboardSample([]);
+      setDashboardEditingWidgetId(null);
+    } catch (error) {
+      alert((error as Error).message);
+    } finally {
+      setDashboardLoading(false);
+    }
+  };
+
+  const refreshDashboardSample = async () => {
+    if (dropIdRef.current === null) return;
+    if (!dashboardSpec) return;
+    setDashboardLoading(true);
+    try {
+      const limit = Math.max(100, Math.min(20_000, Number(dashboardSpec.sampleSize ?? 2000)));
+      const res = await fetch(`/api/events?dropId=${dropIdRef.current}&limit=${limit}`);
+      const data = (await res.json()) as WideEvent[];
+      setDashboardSample(data);
+    } catch (error) {
+      alert((error as Error).message);
+    } finally {
+      setDashboardLoading(false);
+    }
+  };
+
+  const createNewDashboard = async () => {
+    if (dropIdRef.current === null) return;
+    const name = newDashboardName.trim();
+    if (!name) return;
+    const defaultSpec: DashboardSpecV1 = {
+      version: 1,
+      name,
+      sampleSize: 2000,
+      bucketSeconds: 60,
+      widgets: [
+        { id: uuid('stat'), type: 'stat', title: 'Events', metric: 'events', layout: { w: 3, h: 1 } },
+        { id: uuid('stat'), type: 'stat', title: 'Errors', metric: 'errors', layout: { w: 3, h: 1 } },
+        { id: uuid('stat'), type: 'stat', title: 'Error rate', metric: 'error_rate', layout: { w: 3, h: 1 } },
+        { id: uuid('bar'), type: 'bar', title: 'Top services', field: 'service_name', topN: 8, layout: { w: 6, h: 2 } },
+        { id: uuid('hist'), type: 'histogram', title: 'Duration (ms)', field: 'duration_ms', bins: 12, layout: { w: 6, h: 2 } },
+      ],
+    };
+
+    try {
+      const res = await fetch(`/api/dashboards?dropId=${dropIdRef.current}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, spec: defaultSpec }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to create dashboard');
+      }
+      const row = (await res.json()) as DashboardRow;
+      setShowNewDashboard(false);
+      setNewDashboardName('My Dashboard');
+      await fetchDashboards();
+      setDashboardSelectedId(row.id);
+      setDashboardName(row.name);
+      setDashboardSpec(parseDashboardSpec(row.spec_json));
+      setDashboardSample([]);
+      setDashboardEditingWidgetId(null);
+    } catch (error) {
+      alert((error as Error).message);
+    }
+  };
+
+  const saveDashboard = async () => {
+    if (dropIdRef.current === null) return;
+    if (!dashboardSpec) return;
+    try {
+      const creating = dashboardSelectedId === null;
+      const url = creating
+        ? `/api/dashboards?dropId=${dropIdRef.current}`
+        : `/api/dashboards/${dashboardSelectedId}?dropId=${dropIdRef.current}`;
+      const method = creating ? 'POST' : 'PUT';
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: dashboardName, spec: dashboardSpec }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to save dashboard');
+      }
+      const row = (await res.json()) as DashboardRow;
+      await fetchDashboards();
+      setDashboardSelectedId(row.id);
+      setDashboardName(row.name);
+      setDashboardSpec(parseDashboardSpec(row.spec_json));
+      flashToast('Dashboard saved');
+    } catch (error) {
+      alert((error as Error).message);
+    }
+  };
+
+  const deleteDashboardById = async () => {
+    if (dropIdRef.current === null) return;
+    if (dashboardSelectedId === null) return;
+    if (!confirm('Delete this dashboard?')) return;
+    try {
+      const res = await fetch(`/api/dashboards/${dashboardSelectedId}?dropId=${dropIdRef.current}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete');
+      setDashboardSelectedId(null);
+      setDashboardSpec(null);
+      setDashboardName('');
+      setDashboardSample([]);
+      setDashboardEditingWidgetId(null);
+      await fetchDashboards();
+    } catch (error) {
+      alert((error as Error).message);
+    }
+  };
+
+  const generateDashboard = async () => {
+    if (dropIdRef.current === null) return;
+    const limit = Number(generateLimit);
+    if (!Number.isFinite(limit) || limit < 100) return alert('Limit must be >= 100');
+    setDashboardLoading(true);
+    try {
+      const res = await fetch(`/api/dashboards/generate?dropId=${dropIdRef.current}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit, use_ai: generateUseAi }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || 'Failed to generate dashboard');
+      const spec = json.spec as DashboardSpecV1;
+      setDashboardSelectedId(null);
+      setDashboardName(spec.name || 'Auto dashboard');
+      setDashboardSpec(spec);
+      setShowGenerateDashboard(false);
+      setTab('dashboards');
+      setDashboardSample([]);
+      setDashboardEditingWidgetId(null);
+    } catch (error) {
+      alert((error as Error).message);
+    } finally {
+      setDashboardLoading(false);
+    }
+  };
+
+  const updateDashboardSpec = (fn: (prev: DashboardSpecV1) => DashboardSpecV1) => {
+    setDashboardSpec((prev) => (prev ? fn(prev) : prev));
+  };
+
+  const addDashboardWidget = (type: WidgetSpec['type']) => {
+    updateDashboardSpec((prev) => {
+      const baseLayout = { w: 6, h: 2 };
+      const widget: WidgetSpec =
+        type === 'stat'
+          ? { id: uuid('stat'), type: 'stat', title: 'New stat', metric: 'events', layout: { w: 3, h: 1 } }
+          : type === 'bar'
+            ? { id: uuid('bar'), type: 'bar', title: 'New bar', field: 'service_name', topN: 8, layout: baseLayout }
+            : type === 'timeseries'
+              ? { id: uuid('ts'), type: 'timeseries', title: 'New series', metric: 'events', layout: baseLayout }
+              : { id: uuid('hist'), type: 'histogram', title: 'New histogram', field: 'duration_ms', bins: 12, layout: baseLayout };
+      return { ...prev, widgets: [...prev.widgets, widget] };
+    });
+  };
+
+  const deleteDashboardWidget = (id: string) => {
+    updateDashboardSpec((prev) => ({ ...prev, widgets: prev.widgets.filter((w) => w.id !== id) }));
+  };
+
+  const moveDashboardWidget = (id: string, dir: -1 | 1) => {
+    updateDashboardSpec((prev) => {
+      const idx = prev.widgets.findIndex((w) => w.id === id);
+      if (idx < 0) return prev;
+      const nextIdx = idx + dir;
+      if (nextIdx < 0 || nextIdx >= prev.widgets.length) return prev;
+      const widgets = [...prev.widgets];
+      const [w] = widgets.splice(idx, 1);
+      widgets.splice(nextIdx, 0, w);
+      return { ...prev, widgets };
+    });
+  };
+
+  const setWidget = (id: string, partial: Partial<WidgetSpec>) => {
+    updateDashboardSpec((prev) => ({
+      ...prev,
+      widgets: prev.widgets.map((w) => (w.id === id ? ({ ...w, ...partial } as WidgetSpec) : w)),
+    }));
+  };
+
+  const renderLineChart = (points: Array<{ t: number; v: number }>, color: string) => {
+    if (points.length < 2) return <div style={styles.tiny}>Not enough data</div>;
+    const width = 640;
+    const height = 110;
+    const padding = 8;
+    const xs = points.map((p) => p.t);
+    const ys = points.map((p) => p.v);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const dx = Math.max(1, maxX - minX);
+    const dy = Math.max(1e-9, maxY - minY);
+
+    const scaleX = (t: number) => padding + ((t - minX) / dx) * (width - padding * 2);
+    const scaleY = (v: number) => height - padding - ((v - minY) / dy) * (height - padding * 2);
+
+    const d = points
+      .map((p, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(p.t).toFixed(2)} ${scaleY(p.v).toFixed(2)}`)
+      .join(' ');
+
+    return (
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.chart}>
+        <path d={d} fill="none" stroke={color} strokeWidth="2" />
+        <path
+          d={`${d} L ${scaleX(points[points.length - 1].t).toFixed(2)} ${height - padding} L ${scaleX(points[0].t).toFixed(2)} ${height - padding} Z`}
+          fill={color}
+          opacity="0.08"
+        />
+      </svg>
+    );
+  };
+
+  const renderHistogram = (bins: Array<{ x0: number; x1: number; count: number }>, color: string) => {
+    if (!bins.length) return <div style={styles.tiny}>No numeric values</div>;
+    const width = 640;
+    const height = 110;
+    const padding = 8;
+    const max = Math.max(...bins.map((b) => b.count));
+    const barW = (width - padding * 2) / bins.length;
+
+    return (
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.chart}>
+        {bins.map((b, i) => {
+          const h = max ? (b.count / max) * (height - padding * 2) : 0;
+          const x = padding + i * barW;
+          const y = height - padding - h;
+          return <rect key={i} x={x} y={y} width={Math.max(1, barW - 1)} height={h} fill={color} opacity="0.9" />;
+        })}
+      </svg>
+    );
+  };
+
+  async function ensureDashboardDataLoaded() {
+    if (!dashboardSpec) return;
+    if (dashboardSample.length > 0) return;
+    await refreshDashboardSample();
+  }
+
   return (
     <div style={styles.container}>
       <style>{`
@@ -1786,6 +2212,12 @@ export default function App() {
           >
             Traces
           </button>
+          <button
+            style={{ ...styles.tab, ...(tab === 'dashboards' ? styles.tabActive : {}) }}
+            onClick={() => setTab('dashboards')}
+          >
+            Dashboards
+          </button>
         </div>
 
         <div style={styles.toolbar}>
@@ -1808,48 +2240,87 @@ export default function App() {
           <button style={styles.button} onClick={() => setShowRetention(true)} disabled={dropId === null}>
             Retention
           </button>
-          <input
-            type="text"
-            placeholder="Search..."
-            style={styles.searchInput}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-          />
-          <button style={styles.button} onClick={handleSearch}>
-            Search
-          </button>
-          <button style={styles.button} onClick={() => setShowFilters(!showFilters)}>
-            {showFilters ? 'Hide Filters' : 'Filters'} ({Object.keys(activeFilters).length})
-          </button>
-          {Object.keys(activeFilters).length > 0 && (
-            <button style={styles.button} onClick={clearAllFilters}>
-              Clear Filters
-            </button>
-          )}
-          {Object.entries(activeFilters).map(([key, filter]) => (
-            <span key={key} style={styles.chip} title={`${key} ${filter.op} ${filter.values.join(', ')}`}>
-              <span style={{ ...styles.mono, color: '#e5e7eb' }}>{key}</span>
-              <span style={{ color: '#777' }}>{filter.op === 'contains' ? '∋' : '='}</span>
-              <span>{truncate(filter.values.join(', '), 26)}</span>
-              <button style={styles.chipButton} onClick={() => clearFilterKey(key)} aria-label={`Remove ${key} filter`}>
-                ×
+          {tab === 'dashboards' ? (
+            <>
+              <button style={styles.button} onClick={() => setShowNewDashboard(true)} disabled={dropId === null}>
+                New Dashboard
               </button>
-            </span>
-          ))}
-          <button style={styles.button} onClick={() => setPaused(!paused)}>
-            {paused ? 'Resume' : 'Pause'}
-          </button>
-          <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={handleClear}>
-            Clear
-          </button>
-          <div style={styles.liveIndicator}>
-            {connected && !paused && <div style={styles.liveDot} />}
-            {connected ? (paused ? 'Paused' : 'Live') : 'Disconnected'}
-          </div>
+              <button style={styles.button} onClick={() => setShowGenerateDashboard(true)} disabled={dropId === null}>
+                Generate
+              </button>
+              <button style={styles.button} onClick={fetchDashboards} disabled={dropId === null}>
+                Refresh List
+              </button>
+              <button style={styles.button} onClick={refreshDashboardSample} disabled={!dashboardSpec || dropId === null}>
+                Refresh Data
+              </button>
+              <button style={styles.button} onClick={saveDashboard} disabled={!dashboardSpec || dropId === null}>
+                Save
+              </button>
+              <button
+                style={{ ...styles.button, ...styles.buttonDanger }}
+                onClick={deleteDashboardById}
+                disabled={dashboardSelectedId === null}
+              >
+                Delete
+              </button>
+              <div style={styles.pill}>
+                Sample:
+                <span style={{ color: '#fff' }}>
+                  {dashboardSpec?.sampleSize ?? '-'} / loaded {dashboardSample.length}
+                </span>
+              </div>
+            </>
+          ) : (
+            <>
+              <input
+                type="text"
+                placeholder="Search..."
+                style={styles.searchInput}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              />
+              <button style={styles.button} onClick={handleSearch}>
+                Search
+              </button>
+              <button style={styles.button} onClick={() => setShowFilters(!showFilters)}>
+                {showFilters ? 'Hide Filters' : 'Filters'} ({Object.keys(activeFilters).length})
+              </button>
+              {Object.keys(activeFilters).length > 0 && (
+                <button style={styles.button} onClick={clearAllFilters}>
+                  Clear Filters
+                </button>
+              )}
+              {Object.entries(activeFilters).map(([key, filter]) => (
+                <span key={key} style={styles.chip} title={`${key} ${filter.op} ${filter.values.join(', ')}`}>
+                  <span style={{ ...styles.mono, color: '#e5e7eb' }}>{key}</span>
+                  <span style={{ color: '#777' }}>{filter.op === 'contains' ? '∋' : '='}</span>
+                  <span>{truncate(filter.values.join(', '), 26)}</span>
+                  <button
+                    style={styles.chipButton}
+                    onClick={() => clearFilterKey(key)}
+                    aria-label={`Remove ${key} filter`}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <button style={styles.button} onClick={() => setPaused(!paused)}>
+                {paused ? 'Resume' : 'Pause'}
+              </button>
+              <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={handleClear}>
+                Clear
+              </button>
+              <div style={styles.liveIndicator}>
+                {connected && !paused && <div style={styles.liveDot} />}
+                {connected ? (paused ? 'Paused' : 'Live') : 'Disconnected'}
+              </div>
+            </>
+          )}
         </div>
 
-        {showFilters && (
+        {tab !== 'dashboards' && showFilters && (
           <div style={styles.filtersPanel}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '12px', marginBottom: '12px' }}>
               <div style={{ color: '#fff', fontWeight: 700 }}>Smart Filters</div>
@@ -1964,7 +2435,474 @@ export default function App() {
         )}
 
         <div style={styles.content}>
-          {tab === 'events' ? (
+          {tab === 'dashboards' ? (
+            <div style={{ display: 'flex', gap: '16px', alignItems: 'stretch' }}>
+              <div style={{ ...styles.pane, flex: '0 0 340px' }}>
+                <div style={styles.paneHeader}>
+                  <span style={styles.paneTitle}>Dashboards</span>
+                  <button style={styles.copyButton} onClick={fetchDashboards}>
+                    Refresh
+                  </button>
+                </div>
+                <div style={styles.paneBody}>
+                  {dashboards.length === 0 ? (
+                    <div style={styles.tiny}>
+                      No dashboards yet. Create one or generate from the last N wide events.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {dashboards.map((d) => (
+                        <button
+                          key={d.id}
+                          style={{
+                            ...styles.button,
+                            textAlign: 'left' as const,
+                            background: d.id === dashboardSelectedId ? '#1b1b3a' : '#222',
+                            border: d.id === dashboardSelectedId ? '1px solid #6366f1' : '1px solid #333',
+                          }}
+                          onClick={() => loadDashboard(d.id)}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                            <span>{d.name}</span>
+                            <span style={{ color: '#777', fontSize: '12px' }}>#{d.id}</span>
+                          </div>
+                          <div style={{ color: '#777', fontSize: '11px', marginTop: '4px' }}>
+                            Updated: {new Date(d.updated_at).toLocaleString()}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #222' }}>
+                    <div style={styles.tiny}>
+                      Builder edits a JSON dashboard spec. Save stores it per Drop.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ ...styles.pane, flex: 1 }}>
+                <div style={styles.paneHeader}>
+                  <span style={styles.paneTitle}>Builder</span>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    {dashboardLoading && <span style={styles.tiny}>Loading…</span>}
+                  </div>
+                </div>
+                <div style={styles.paneBody}>
+                  {!effectiveDashboardSpec ? (
+                    <div style={styles.empty}>
+                      Select a dashboard, or click “Generate” to create one from the last N events.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                        <div>
+                          <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Dashboard name</div>
+                          <input
+                            style={styles.filterInput}
+                            value={dashboardName}
+                            onChange={(e) => {
+                              const name = e.target.value;
+                              setDashboardName(name);
+                              setDashboardSpec((prev) => (prev ? { ...prev, name } : prev));
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Sample size (N)</div>
+                          <input
+                            style={styles.filterInput}
+                            inputMode="numeric"
+                            value={String(effectiveDashboardSpec.sampleSize)}
+                            onChange={(e) =>
+                              updateDashboardSpec((prev) => ({
+                                ...prev,
+                                sampleSize: Number(e.target.value || '0'),
+                              }))
+                            }
+                          />
+                        </div>
+                        <div>
+                          <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Bucket (sec)</div>
+                          <input
+                            style={styles.filterInput}
+                            inputMode="numeric"
+                            value={String(effectiveDashboardSpec.bucketSeconds)}
+                            onChange={(e) =>
+                              updateDashboardSpec((prev) => ({
+                                ...prev,
+                                bucketSeconds: Number(e.target.value || '0'),
+                              }))
+                            }
+                          />
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '420px 1fr', gap: '16px', alignItems: 'start' }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const, marginBottom: '12px' }}>
+                            <span style={styles.pill}>Add:</span>
+                            <button style={styles.button} onClick={() => addDashboardWidget('stat')}>
+                              Stat
+                            </button>
+                            <button style={styles.button} onClick={() => addDashboardWidget('timeseries')}>
+                              Timeseries
+                            </button>
+                            <button style={styles.button} onClick={() => addDashboardWidget('bar')}>
+                              Bar
+                            </button>
+                            <button style={styles.button} onClick={() => addDashboardWidget('histogram')}>
+                              Histogram
+                            </button>
+                          </div>
+
+                          <div style={{ ...styles.pane, overflow: 'hidden', maxHeight: '70vh' }}>
+                            <div style={styles.paneHeader}>
+                              <span style={styles.paneTitle}>Widgets</span>
+                              <span style={styles.tiny}>{effectiveDashboardSpec.widgets.length}</span>
+                            </div>
+                            <div style={{ ...styles.paneBody, maxHeight: 'calc(70vh - 44px)', padding: 0 }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '12px' }}>
+                                {effectiveDashboardSpec.widgets.map((w, idx) => {
+                                  const expanded = w.id === dashboardEditingWidgetId;
+
+                                  const setWidgetType = (nextType: WidgetSpec['type']) => {
+                                    updateDashboardSpec((prev) => ({
+                                      ...prev,
+                                      widgets: prev.widgets.map((x) => {
+                                        if (x.id !== w.id) return x;
+                                        if (nextType === 'stat')
+                                          return {
+                                            id: x.id,
+                                            type: 'stat',
+                                            title: x.title || 'Stat',
+                                            metric: (x as any).metric || 'events',
+                                            layout: x.layout ?? { w: 3, h: 1 },
+                                          };
+                                        if (nextType === 'timeseries')
+                                          return {
+                                            id: x.id,
+                                            type: 'timeseries',
+                                            title: x.title || 'Series',
+                                            metric: (x as any).metric || 'events',
+                                            layout: x.layout ?? { w: 6, h: 2 },
+                                          };
+                                        if (nextType === 'bar')
+                                          return {
+                                            id: x.id,
+                                            type: 'bar',
+                                            title: x.title || 'Bar',
+                                            field: (x as any).field || 'service_name',
+                                            topN: Number((x as any).topN || 8),
+                                            layout: x.layout ?? { w: 6, h: 2 },
+                                          };
+                                        return {
+                                          id: x.id,
+                                          type: 'histogram',
+                                          title: x.title || 'Histogram',
+                                          field: (x as any).field || 'duration_ms',
+                                          bins: Number((x as any).bins || 12),
+                                          layout: x.layout ?? { w: 6, h: 2 },
+                                        };
+                                      }),
+                                    }));
+                                  };
+
+                                  return (
+                                    <div
+                                      key={w.id}
+                                      style={{
+                                        border: '1px solid #2a2a2a',
+                                        borderRadius: '12px',
+                                        background: expanded ? '#0b1020' : '#0f0f0f',
+                                        padding: '10px',
+                                      }}
+                                      onClick={() => setDashboardEditingWidgetId(w.id)}
+                                    >
+                                      <div
+                                        style={{
+                                          display: 'flex',
+                                          justifyContent: 'space-between',
+                                          gap: '12px',
+                                          alignItems: 'center',
+                                        }}
+                                      >
+                                        <div style={{ minWidth: 0 }}>
+                                          <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                                            <span style={{ ...styles.mono, color: '#a78bfa' }}>{w.type}</span>
+                                            <span
+                                              style={{
+                                                fontSize: '13px',
+                                                color: '#fff',
+                                                fontWeight: 700,
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap',
+                                                maxWidth: '260px',
+                                                display: 'inline-block',
+                                                verticalAlign: 'bottom',
+                                              }}
+                                            >
+                                              {w.title || '(untitled)'}
+                                            </span>
+                                          </div>
+                                          <div style={styles.tiny}>
+                                            layout {w.layout?.w ?? (w.type === 'stat' ? 3 : 6)}×{w.layout?.h ?? (w.type === 'stat' ? 1 : 2)}
+                                          </div>
+                                        </div>
+
+                                        <div style={{ display: 'flex', gap: '8px' }}>
+                                          <button
+                                            style={styles.copyButton}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              moveDashboardWidget(w.id, -1);
+                                            }}
+                                            disabled={idx === 0}
+                                            title="Move up"
+                                          >
+                                            ↑
+                                          </button>
+                                          <button
+                                            style={styles.copyButton}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              moveDashboardWidget(w.id, 1);
+                                            }}
+                                            disabled={idx === effectiveDashboardSpec.widgets.length - 1}
+                                            title="Move down"
+                                          >
+                                            ↓
+                                          </button>
+                                          <button
+                                            style={styles.copyButton}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              deleteDashboardWidget(w.id);
+                                            }}
+                                            title="Remove"
+                                          >
+                                            ×
+                                          </button>
+                                        </div>
+                                      </div>
+
+                                      {expanded && (
+                                        <div style={{ marginTop: '10px', display: 'grid', gap: '10px' }}>
+                                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const }}>
+                                            <select
+                                              style={styles.select}
+                                              value={w.type}
+                                              onChange={(e) => setWidgetType(e.target.value as any)}
+                                              onClick={(e) => e.stopPropagation()}
+                                            >
+                                              <option value="stat">stat</option>
+                                              <option value="timeseries">timeseries</option>
+                                              <option value="bar">bar</option>
+                                              <option value="histogram">histogram</option>
+                                            </select>
+                                            <input
+                                              style={{ ...styles.filterInput, flex: 1, minWidth: '180px' }}
+                                              value={w.title}
+                                              onChange={(e) => setWidget(w.id, { title: e.target.value } as any)}
+                                              onClick={(e) => e.stopPropagation()}
+                                              placeholder="Title"
+                                            />
+                                          </div>
+
+                                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' as const, alignItems: 'center' }}>
+                                            <span style={styles.tiny}>w</span>
+                                            <input
+                                              style={{ ...styles.filterInput, width: '78px' }}
+                                              inputMode="numeric"
+                                              value={String(w.layout?.w ?? (w.type === 'stat' ? 3 : 6))}
+                                              onChange={(e) =>
+                                                setWidget(w.id, {
+                                                  layout: {
+                                                    w: Number(e.target.value || '6'),
+                                                    h: w.layout?.h ?? (w.type === 'stat' ? 1 : 2),
+                                                  },
+                                                } as any)
+                                              }
+                                              onClick={(e) => e.stopPropagation()}
+                                            />
+                                            <span style={styles.tiny}>h</span>
+                                            <input
+                                              style={{ ...styles.filterInput, width: '78px' }}
+                                              inputMode="numeric"
+                                              value={String(w.layout?.h ?? (w.type === 'stat' ? 1 : 2))}
+                                              onChange={(e) =>
+                                                setWidget(w.id, {
+                                                  layout: {
+                                                    w: w.layout?.w ?? (w.type === 'stat' ? 3 : 6),
+                                                    h: Number(e.target.value || '2'),
+                                                  },
+                                                } as any)
+                                              }
+                                              onClick={(e) => e.stopPropagation()}
+                                            />
+
+                                            {w.type === 'stat' && (
+                                              <select
+                                                style={styles.select}
+                                                value={(w as any).metric}
+                                                onChange={(e) => setWidget(w.id, { metric: e.target.value } as any)}
+                                                onClick={(e) => e.stopPropagation()}
+                                              >
+                                                <option value="events">events</option>
+                                                <option value="errors">errors</option>
+                                                <option value="error_rate">error_rate</option>
+                                                <option value="unique_traces">unique_traces</option>
+                                                <option value="unique_users">unique_users</option>
+                                              </select>
+                                            )}
+                                            {w.type === 'timeseries' && (
+                                              <select
+                                                style={styles.select}
+                                                value={(w as any).metric}
+                                                onChange={(e) => setWidget(w.id, { metric: e.target.value } as any)}
+                                                onClick={(e) => e.stopPropagation()}
+                                              >
+                                                <option value="events">events</option>
+                                                <option value="errors">errors</option>
+                                                <option value="error_rate">error_rate</option>
+                                              </select>
+                                            )}
+                                            {w.type === 'bar' && (
+                                              <>
+                                                <input
+                                                  style={{ ...styles.filterInput, width: '200px' }}
+                                                  value={(w as any).field}
+                                                  onChange={(e) => setWidget(w.id, { field: e.target.value } as any)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  placeholder="field (service_name, outcome, operation, user_id, foo.bar)"
+                                                />
+                                                <input
+                                                  style={{ ...styles.filterInput, width: '86px' }}
+                                                  inputMode="numeric"
+                                                  value={String((w as any).topN)}
+                                                  onChange={(e) => setWidget(w.id, { topN: Number(e.target.value || '8') } as any)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                />
+                                              </>
+                                            )}
+                                            {w.type === 'histogram' && (
+                                              <>
+                                                <input
+                                                  style={{ ...styles.filterInput, width: '200px' }}
+                                                  value={(w as any).field}
+                                                  onChange={(e) => setWidget(w.id, { field: e.target.value } as any)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  placeholder="numeric field (duration_ms, foo.ms)"
+                                                />
+                                                <input
+                                                  style={{ ...styles.filterInput, width: '86px' }}
+                                                  inputMode="numeric"
+                                                  value={String((w as any).bins)}
+                                                  onChange={(e) => setWidget(w.id, { bins: Number(e.target.value || '12') } as any)}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                />
+                                              </>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ ...styles.pane, overflow: 'hidden' }}>
+                          <div style={styles.paneHeader}>
+                            <span style={styles.paneTitle}>Preview</span>
+                            <span style={styles.tiny}>
+                              last {effectiveDashboardSpec.sampleSize} (loaded {dashboardSample.length})
+                            </span>
+                          </div>
+                          <div style={{ ...styles.paneBody, maxHeight: '70vh' }}>
+                            {dashboardSample.length === 0 ? (
+                              <div style={styles.empty}>No sample loaded. Click “Refresh Data” in the toolbar.</div>
+                            ) : (
+                              <div style={styles.dashboardGrid}>
+                                {effectiveDashboardSpec.widgets.map((w) => {
+                                  const layoutW = Math.max(
+                                    1,
+                                    Math.min(12, w.layout?.w ?? (w.type === 'stat' ? 3 : 6))
+                                  );
+                                  const result = computeWidget(w as any, dashboardSample as any, effectiveDashboardSpec);
+
+                                  return (
+                                    <div key={w.id} style={{ ...styles.card, gridColumn: `span ${layoutW}` }}>
+                                      <div style={styles.cardHeader}>
+                                        <span style={styles.cardTitle}>{w.title}</span>
+                                        <span style={styles.tiny}>{w.type}</span>
+                                      </div>
+                                      <div style={styles.cardBody}>
+                                        {result.type === 'stat' ? (
+                                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                            <div style={{ fontSize: '30px', fontWeight: 800, color: '#fff' }}>
+                                              {result.data.value}
+                                            </div>
+                                            {result.data.sub && <div style={styles.tiny}>{result.data.sub}</div>}
+                                          </div>
+                                        ) : result.type === 'bar' ? (
+                                          (() => {
+                                            const max = Math.max(1, ...result.data.values);
+                                            return (
+                                              <div>
+                                                {result.data.labels.map((label, i) => {
+                                                  const v = result.data.values[i];
+                                                  const pct = (v / max) * 100;
+                                                  return (
+                                                    <div key={label} style={styles.barRow}>
+                                                      <div style={{ minWidth: 0 }}>
+                                                        <div style={styles.barLabel} title={label}>
+                                                          {label}
+                                                        </div>
+                                                        <div style={{ ...styles.barTrack, marginTop: '6px' }}>
+                                                          <div style={{ ...styles.barFill, width: `${pct}%` }} />
+                                                        </div>
+                                                      </div>
+                                                      <div style={styles.barValue}>{formatNumber(v)}</div>
+                                                    </div>
+                                                  );
+                                                })}
+                                              </div>
+                                            );
+                                          })()
+                                        ) : result.type === 'timeseries' ? (
+                                          <div>
+                                            {renderLineChart(
+                                              result.data.points,
+                                              result.data.unit === '%' ? '#f472b6' : '#6366f1'
+                                            )}
+                                            <div style={styles.tiny}>Points: {result.data.points.length}</div>
+                                          </div>
+                                        ) : (
+                                          <div>
+                                            {renderHistogram(result.data.bins, '#a78bfa')}
+                                            <div style={styles.tiny}>Bins: {result.data.bins.length}</div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : tab === 'events' ? (
             events.length === 0 ? (
               <div style={styles.empty}>No wide events yet. They will appear here in real-time.</div>
             ) : visibleEvents.length === 0 ? (
@@ -2144,6 +3082,90 @@ export default function App() {
         </div>
       )}
 
+      {showNewDashboard && (
+        <div style={styles.modal} onClick={() => setShowNewDashboard(false)}>
+          <div style={styles.modalSmallContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>Create Dashboard</span>
+              <div style={styles.modalActions}>
+                <button style={styles.button} onClick={() => setShowNewDashboard(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div style={styles.modalBody}>
+              <div style={{ color: '#888', fontSize: '13px', marginBottom: '10px' }}>
+                Creates an editable dashboard for the current Drop.
+              </div>
+              <input
+                style={styles.filterInput}
+                value={newDashboardName}
+                onChange={(e) => setNewDashboardName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && createNewDashboard()}
+                autoFocus
+              />
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
+                <button style={styles.button} onClick={() => setShowNewDashboard(false)}>
+                  Cancel
+                </button>
+                <button style={styles.button} onClick={createNewDashboard} disabled={!newDashboardName.trim()}>
+                  Create
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGenerateDashboard && (
+        <div style={styles.modal} onClick={() => setShowGenerateDashboard(false)}>
+          <div style={styles.modalSmallContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>Generate Dashboard</span>
+              <div style={styles.modalActions}>
+                <button style={styles.button} onClick={() => setShowGenerateDashboard(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div style={styles.modalBody}>
+              <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px' }}>
+                Builds a dashboard spec by studying field cardinality in the last N wide events.
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', alignItems: 'end' }}>
+                <div>
+                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Sample size (N)</div>
+                  <input
+                    style={styles.filterInput}
+                    inputMode="numeric"
+                    value={generateLimit}
+                    onChange={(e) => setGenerateLimit(e.target.value)}
+                  />
+                </div>
+                <label style={{ display: 'flex', gap: '10px', alignItems: 'center', color: '#ddd', fontSize: '13px' }}>
+                  <input type="checkbox" checked={generateUseAi} onChange={(e) => setGenerateUseAi(e.target.checked)} />
+                  Use AI (OpenRouter)
+                </label>
+              </div>
+              {generateUseAi && (
+                <div style={{ ...styles.tiny, marginTop: '10px' }}>
+                  Requires server env var <span style={styles.mono}>OPENROUTER_API_KEY</span> (optional{' '}
+                  <span style={styles.mono}>OPENROUTER_MODEL</span>).
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '16px' }}>
+                <button style={styles.button} onClick={() => setShowGenerateDashboard(false)}>
+                  Cancel
+                </button>
+                <button style={styles.button} onClick={generateDashboard} disabled={dropId === null}>
+                  Generate
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {selected?.type === 'event' && (
         <EventDetailModal
           event={selected.event}
@@ -2159,6 +3181,8 @@ export default function App() {
           onClose={() => setSelected(null)}
         />
       )}
+
+      {appToast && <div style={styles.toast}>{appToast}</div>}
     </div>
   );
 }

@@ -36,6 +36,16 @@ db.exec(`
     FOREIGN KEY (drop_id) REFERENCES drops(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS dashboards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drop_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch() * 1000),
+    updated_at INTEGER DEFAULT (unixepoch() * 1000),
+    FOREIGN KEY (drop_id) REFERENCES drops(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS traces (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     drop_id INTEGER NOT NULL DEFAULT 1,
@@ -105,6 +115,8 @@ ensureRetentionRow(DEFAULT_DROP_ID);
 
 // Indexes that depend on drop_id (must run after migrations)
 db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_dashboards_drop_updated ON dashboards(drop_id, updated_at DESC);
+
   CREATE INDEX IF NOT EXISTS idx_traces_drop_created ON traces(drop_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_traces_drop_trace_id ON traces(drop_id, trace_id);
   CREATE INDEX IF NOT EXISTS idx_traces_service ON traces(service_name);
@@ -421,4 +433,68 @@ export function pruneByRetention(dropId?: number, now = Date.now()) {
   }
 
   return results;
+}
+
+export function listDashboards(dropId: number) {
+  return db
+    .prepare(
+      `
+        SELECT id, drop_id, name, spec_json, created_at, updated_at
+        FROM dashboards
+        WHERE drop_id = ?
+        ORDER BY updated_at DESC
+      `
+    )
+    .all(dropId);
+}
+
+export function getDashboard(dropId: number, dashboardId: number) {
+  return db
+    .prepare(
+      `
+        SELECT id, drop_id, name, spec_json, created_at, updated_at
+        FROM dashboards
+        WHERE drop_id = ? AND id = ?
+      `
+    )
+    .get(dropId, dashboardId);
+}
+
+export function createDashboard(dropId: number, name: string, specJson: string) {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Dashboard name is required');
+  const info = db
+    .prepare(
+      `
+        INSERT INTO dashboards (drop_id, name, spec_json)
+        VALUES (?, ?, ?)
+      `
+    )
+    .run(dropId, trimmed, specJson);
+  return getDashboard(dropId, Number(info.lastInsertRowid));
+}
+
+export function updateDashboard(dropId: number, dashboardId: number, name?: string, specJson?: string) {
+  const existing = getDashboard(dropId, dashboardId) as any;
+  if (!existing) return null;
+
+  const nextName = name === undefined ? existing.name : name.toString().trim();
+  if (!nextName) throw new Error('Dashboard name is required');
+  const nextSpec = specJson === undefined ? existing.spec_json : specJson;
+
+  db.prepare(
+    `
+      UPDATE dashboards
+      SET name = ?,
+          spec_json = ?,
+          updated_at = (unixepoch() * 1000)
+      WHERE drop_id = ? AND id = ?
+    `
+  ).run(nextName, nextSpec, dropId, dashboardId);
+
+  return getDashboard(dropId, dashboardId);
+}
+
+export function deleteDashboard(dropId: number, dashboardId: number) {
+  return db.prepare(`DELETE FROM dashboards WHERE drop_id = ? AND id = ?`).run(dropId, dashboardId).changes > 0;
 }

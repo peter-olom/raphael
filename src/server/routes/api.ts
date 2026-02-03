@@ -4,6 +4,11 @@ import {
   createDrop,
   getDropById,
   getDropRetention,
+  listDashboards,
+  getDashboard,
+  createDashboard,
+  updateDashboard,
+  deleteDashboard,
   getRecentTraces,
   getRecentWideEvents,
   getTraceById,
@@ -17,6 +22,7 @@ import {
   pruneByRetention,
   setDropRetentionMs,
 } from '../db/sqlite.js';
+import { generateDashboardHeuristic, generateDashboardWithOpenRouter, profileWideEvents } from '../dashboardGenerator.js';
 
 export const apiRouter = Router();
 
@@ -145,4 +151,87 @@ apiRouter.put('/drops/:dropId/retention', (req: Request, res: Response) => {
   setDropRetentionMs(dropId, tracesRetentionMs, eventsRetentionMs);
   pruneByRetention(dropId);
   res.json({ success: true });
+});
+
+// Dashboards
+apiRouter.get('/dashboards', (req: Request, res: Response) => {
+  const dropId = getDropId(req);
+  res.json(listDashboards(dropId));
+});
+
+apiRouter.get('/dashboards/:dashboardId', (req: Request, res: Response) => {
+  const dropId = getDropId(req);
+  const raw = (req.params as any).dashboardId as string | string[];
+  const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
+  if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
+  const row = getDashboard(dropId, dashboardId);
+  if (!row) return res.status(404).json({ error: 'Dashboard not found' });
+  res.json(row);
+});
+
+apiRouter.post('/dashboards', (req: Request, res: Response) => {
+  const dropId = getDropId(req);
+  try {
+    const name = (req.body?.name ?? '').toString();
+    const specJson = JSON.stringify(req.body?.spec ?? {});
+    const row = createDashboard(dropId, name, specJson);
+    res.status(201).json(row);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Failed to create dashboard' });
+  }
+});
+
+apiRouter.put('/dashboards/:dashboardId', (req: Request, res: Response) => {
+  const dropId = getDropId(req);
+  const raw = (req.params as any).dashboardId as string | string[];
+  const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
+  if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
+
+  try {
+    const name = req.body?.name === undefined ? undefined : (req.body?.name ?? '').toString();
+    const specJson = req.body?.spec === undefined ? undefined : JSON.stringify(req.body?.spec ?? {});
+    const row = updateDashboard(dropId, dashboardId, name, specJson);
+    if (!row) return res.status(404).json({ error: 'Dashboard not found' });
+    res.json(row);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Failed to update dashboard' });
+  }
+});
+
+apiRouter.delete('/dashboards/:dashboardId', (req: Request, res: Response) => {
+  const dropId = getDropId(req);
+  const raw = (req.params as any).dashboardId as string | string[];
+  const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
+  if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
+  const ok = deleteDashboard(dropId, dashboardId);
+  if (!ok) return res.status(404).json({ error: 'Dashboard not found' });
+  res.json({ success: true });
+});
+
+apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
+  const dropId = getDropId(req);
+  const drop = getDropById(dropId) as any;
+  const dropName = drop?.name ?? `#${dropId}`;
+
+  const limit = Math.max(100, Math.min(20_000, Number(req.body?.limit ?? 2000)));
+  const useAi = Boolean(req.body?.use_ai ?? false);
+
+  // Sample: last N events (by created_at)
+  const sample = getRecentWideEvents(dropId, limit, 0) as any[];
+  const profiles = profileWideEvents(sample);
+
+  try {
+    if (useAi) {
+      const apiKey = process.env.OPENROUTER_API_KEY;
+      if (!apiKey) return res.status(400).json({ error: 'OPENROUTER_API_KEY is not set' });
+      const model = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+      const spec = await generateDashboardWithOpenRouter({ apiKey, model, dropName, sampleSize: sample.length, profiles });
+      return res.json({ spec, profiles });
+    }
+
+    const spec = generateDashboardHeuristic(dropName, sample.length, profiles);
+    return res.json({ spec, profiles });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message || 'Failed to generate dashboard' });
+  }
 });
