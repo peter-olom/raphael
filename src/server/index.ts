@@ -7,8 +7,12 @@ import { fileURLToPath } from 'url';
 import { otlpRouter } from './routes/otlp.js';
 import { eventsRouter } from './routes/events.js';
 import { apiRouter } from './routes/api.js';
+import { queryRouter } from './routes/query.js';
 import { setupWebSocket } from './websocket.js';
 import { pruneByRetention } from './db/sqlite.js';
+import { auth, authMiddleware, ensureAdminSeed, getAuthConfigSummary } from './auth.js';
+import { toNodeHandler } from 'better-auth/node';
+import { adminRouter } from './routes/admin.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,12 +20,28 @@ const app = express();
 const server = createServer(app);
 
 // Middleware
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
+
+// Auth config (non-BetterAuth endpoint)
+app.get('/api/auth/config', (_req, res) => {
+  res.json(getAuthConfigSummary());
+});
+
+// BetterAuth handler (must come before express.json)
+app.all('/api/auth/*', toNodeHandler(auth));
+
 app.use(express.json({ limit: '10mb' }));
+app.use(authMiddleware);
+
+void ensureAdminSeed();
 
 // OTLP receivers (traces and logs)
 app.use('/', otlpRouter);
 app.use('/', eventsRouter);
+app.use('/', queryRouter);
+
+// Admin routes
+app.use('/api/admin', adminRouter);
 
 // API routes
 app.use('/api', apiRouter);

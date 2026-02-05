@@ -20,25 +20,37 @@ import {
   searchWideEvents,
   getStats,
   clearAll,
-  ensureDrop,
   listDrops,
+  listUserDropPermissions,
   pruneByRetention,
   setDropRetentionMs,
+  resolveDropId,
 } from '../db/sqlite.js';
 import { generateDashboardHeuristic, generateDashboardWithOpenRouter, profileWideEvents } from '../dashboardGenerator.js';
 import { decryptSecret, encryptSecret } from '../secrets.js';
+import { authEnabled, noteApiKeyUsageDrop, requireAdmin, requireAuth, requireDropAccess } from '../auth.js';
 
 export const apiRouter = Router();
 
-function getDropId(req: Request): number {
+function getDropId(req: Request, res: Response): number | null {
   const raw = req.query.dropId ?? req.query.drop ?? req.header('x-raphael-drop');
   const first = Array.isArray(raw) ? raw[0] : raw;
-  return ensureDrop(first?.toString());
+  const allowCreate = !authEnabled() || req.auth?.user?.role === 'admin';
+  const dropId = resolveDropId(first?.toString() ?? '', allowCreate);
+  if (dropId === null) {
+    res.status(404).json({ error: 'Drop not found' });
+    return null;
+  }
+  noteApiKeyUsageDrop(req, dropId);
+  return dropId;
 }
 
 // Get recent traces
 apiRouter.get('/traces', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const limit = parseInt(req.query.limit as string) || 100;
   const offset = parseInt(req.query.offset as string) || 0;
   const traces = getRecentTraces(dropId, limit, offset);
@@ -47,7 +59,10 @@ apiRouter.get('/traces', (req: Request, res: Response) => {
 
 // Get recent wide events
 apiRouter.get('/events', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const limit = parseInt(req.query.limit as string) || 100;
   const offset = parseInt(req.query.offset as string) || 0;
   const events = getRecentWideEvents(dropId, limit, offset);
@@ -56,7 +71,10 @@ apiRouter.get('/events', (req: Request, res: Response) => {
 
 // Get trace by ID (all spans)
 apiRouter.get('/traces/:traceId', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const raw = (req.params as any).traceId as string | string[];
   const traceId = Array.isArray(raw) ? raw[0] : raw;
   const spans = getTraceById(dropId, traceId);
@@ -66,7 +84,10 @@ apiRouter.get('/traces/:traceId', (req: Request, res: Response) => {
 
 // Search traces
 apiRouter.get('/search/traces', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const query = req.query.q as string || '';
   const limit = parseInt(req.query.limit as string) || 100;
   const results = searchTraces(dropId, query, limit);
@@ -75,7 +96,10 @@ apiRouter.get('/search/traces', (req: Request, res: Response) => {
 
 // Search wide events
 apiRouter.get('/search/events', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const query = req.query.q as string || '';
   const limit = parseInt(req.query.limit as string) || 100;
   const results = searchWideEvents(dropId, query, limit);
@@ -84,24 +108,42 @@ apiRouter.get('/search/events', (req: Request, res: Response) => {
 
 // Get stats
 apiRouter.get('/stats', (_req: Request, res: Response) => {
-  const dropId = getDropId(_req);
+  if (!requireAuth(_req, res)) return;
+  const dropId = getDropId(_req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(_req, res, dropId, 'query')) return;
   const stats = getStats(dropId);
   res.json(stats);
 });
 
 // Clear all data
 apiRouter.delete('/clear', (_req: Request, res: Response) => {
-  const dropId = getDropId(_req);
+  if (!requireAdmin(_req, res)) return;
+  const dropId = getDropId(_req, res);
+  if (dropId === null) return;
   clearAll(dropId);
   res.json({ success: true });
 });
 
 // Drops
 apiRouter.get('/drops', (_req: Request, res: Response) => {
-  res.json({ default_drop_id: DEFAULT_DROP_ID, drops: listDrops() });
+  if (!requireAuth(_req, res)) return;
+  if (_req.auth?.user?.role === 'admin' || !authEnabled()) {
+    res.json({ default_drop_id: DEFAULT_DROP_ID, drops: listDrops() });
+    return;
+  }
+  if (_req.auth?.user) {
+    const permissions = listUserDropPermissions(_req.auth.user.id);
+    const allowed = new Set(permissions.filter((p) => p.can_query).map((p) => p.drop_id));
+    const drops = listDrops().filter((d) => allowed.has(d.id));
+    res.json({ default_drop_id: DEFAULT_DROP_ID, drops });
+    return;
+  }
+  res.status(403).json({ error: 'Drop access denied' });
 });
 
 apiRouter.post('/drops', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
   try {
     const name = (req.body?.name ?? '').toString();
     const drop = createDrop(name);
@@ -112,6 +154,7 @@ apiRouter.post('/drops', (req: Request, res: Response) => {
 });
 
 apiRouter.put('/drops/:dropId/retention', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
   const raw = (req.params as any).dropId as string | string[];
   const dropId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
   if (!Number.isFinite(dropId)) {
@@ -159,12 +202,18 @@ apiRouter.put('/drops/:dropId/retention', (req: Request, res: Response) => {
 
 // Dashboards
 apiRouter.get('/dashboards', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   res.json(listDashboards(dropId));
 });
 
 apiRouter.get('/dashboards/:dashboardId', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const raw = (req.params as any).dashboardId as string | string[];
   const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
   if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
@@ -174,7 +223,10 @@ apiRouter.get('/dashboards/:dashboardId', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/dashboards', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   try {
     const name = (req.body?.name ?? '').toString();
     const specJson = JSON.stringify(req.body?.spec ?? {});
@@ -186,7 +238,10 @@ apiRouter.post('/dashboards', (req: Request, res: Response) => {
 });
 
 apiRouter.put('/dashboards/:dashboardId', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const raw = (req.params as any).dashboardId as string | string[];
   const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
   if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
@@ -203,7 +258,10 @@ apiRouter.put('/dashboards/:dashboardId', (req: Request, res: Response) => {
 });
 
 apiRouter.delete('/dashboards/:dashboardId', (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const raw = (req.params as any).dashboardId as string | string[];
   const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
   if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
@@ -213,7 +271,10 @@ apiRouter.delete('/dashboards/:dashboardId', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
-  const dropId = getDropId(req);
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const drop = getDropById(dropId) as any;
   const dropName = drop?.name ?? `#${dropId}`;
 
@@ -244,12 +305,14 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
 
 // Settings: OpenRouter (global)
 apiRouter.get('/settings/openrouter', (_req: Request, res: Response) => {
+  if (!requireAdmin(_req, res)) return;
   const model = getAppSetting('openrouter_model') || process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
   const storedKey = getAppSetting('openrouter_api_key');
   res.json({ model, api_key_set: Boolean(storedKey || process.env.OPENROUTER_API_KEY) });
 });
 
 apiRouter.put('/settings/openrouter', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
   const apiKeyRaw = req.body?.api_key;
   const modelRaw = req.body?.model;
 

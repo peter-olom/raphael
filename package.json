@@ -14,7 +14,8 @@
     "preview": "npm run build && npm run start"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
+    "better-auth": "^1.4.18",
+    "better-sqlite3": "^12.6.2",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "react-grid-layout": "^2.2.2",

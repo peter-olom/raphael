@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { ensureDrop, insertTraceRow } from '../db/sqlite.js';
+import { insertTraceRow, resolveDropId } from '../db/sqlite.js';
 import { broadcast } from '../websocket.js';
+import { authEnabled, noteApiKeyUsageDrop, requireAuth, requireDropAccess } from '../auth.js';
 
 export const otlpRouter = Router();
 
@@ -34,9 +35,18 @@ interface OtlpTraceRequest {
 
 // OTLP HTTP JSON receiver for traces
 otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
+  if (!requireAuth(req, res)) return;
   try {
     const body = req.body as OtlpTraceRequest;
-    const dropId = ensureDrop((req.header('x-raphael-drop') || (req.query.drop as string) || '').toString());
+    const rawDrop = (req.header('x-raphael-drop') || (req.query.drop as string) || '').toString();
+    const allowCreate = !authEnabled() || req.auth?.user?.role === 'admin';
+    const dropId = resolveDropId(rawDrop, allowCreate);
+    if (dropId === null) {
+      res.status(404).json({ error: 'Drop not found' });
+      return;
+    }
+    noteApiKeyUsageDrop(req, dropId);
+    if (!requireDropAccess(req, res, dropId, 'ingest')) return;
 
     if (!body.resourceSpans) {
       res.status(200).json({ partialSuccess: {} });

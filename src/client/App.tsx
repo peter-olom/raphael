@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
+import { createAuthClient } from 'better-auth/client';
 import type { DashboardRow, DashboardSpecV1, WidgetSpec } from './dashboards/types';
 import { computeWidget, parseDashboardSpec } from './dashboards/render';
 import GridLayout, { useContainerWidth, type Layout } from 'react-grid-layout';
@@ -1643,6 +1644,45 @@ export default function App() {
     'events';
 
   const [tab, setTab] = useState<Tab>(initialTab);
+  const [authEnabled, setAuthEnabled] = useState<boolean | null>(null);
+  const [authProviders, setAuthProviders] = useState<Array<{ id: string; label: string }>>([]);
+  const [authEmailPasswordEnabled, setAuthEmailPasswordEnabled] = useState(false);
+  const [authUser, setAuthUser] = useState<{ id: string; email: string; role: 'admin' | 'member' } | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [users, setUsers] = useState<
+    Array<{ user_id: string; email: string; role: 'admin' | 'member'; disabled: number; created_at: number; last_login_at: number | null }>
+  >([]);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [selectedUserRole, setSelectedUserRole] = useState<'admin' | 'member'>('member');
+  const [selectedUserDisabled, setSelectedUserDisabled] = useState(false);
+  const [userPermissions, setUserPermissions] = useState<Array<{ drop_id: number; can_ingest: number; can_query: number }>>([]);
+  const [userSaving, setUserSaving] = useState(false);
+  const [serviceAccounts, setServiceAccounts] = useState<
+    Array<{ id: number; name: string; created_at: number; created_by_email: string | null }>
+  >([]);
+  const [apiKeys, setApiKeys] = useState<
+    Array<{
+      id: number;
+      service_account_id: number;
+      name: string | null;
+      key_prefix: string;
+      created_at: number;
+      revoked_at: number | null;
+      permissions: Array<{ drop_id: number; can_ingest: number; can_query: number }>;
+    }>
+  >([]);
+  const [newServiceAccountName, setNewServiceAccountName] = useState('');
+  const [selectedServiceAccountId, setSelectedServiceAccountId] = useState<number | null>(null);
+  const [newApiKeyName, setNewApiKeyName] = useState('');
+  const [apiKeyDropId, setApiKeyDropId] = useState<number | null>(null);
+  const [apiKeyCanIngest, setApiKeyCanIngest] = useState(true);
+  const [apiKeyCanQuery, setApiKeyCanQuery] = useState(true);
+  const [generatedApiKey, setGeneratedApiKey] = useState<string | null>(null);
+  const [generatedApiKeyMeta, setGeneratedApiKeyMeta] = useState<string | null>(null);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [events, setEvents] = useState<WideEvent[]>([]);
   const [stats, setStats] = useState<Stats>({ traces: 0, wideEvents: 0, errors: 0 });
@@ -1681,6 +1721,11 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const authActive = authEnabled === true;
+  const authReady = authEnabled === false || authUser !== null;
+  const isAdmin = authUser?.role === 'admin';
+  const isMember = authActive && !isAdmin;
+  const authClient = useMemo(() => createAuthClient({ baseURL: window.location.origin }), []);
 
   // Persist tab selection per browser tab via URL (refresh-safe).
   useEffect(() => {
@@ -1695,6 +1740,56 @@ export default function App() {
     window.localStorage.setItem('raphael.dashboardMode', dashboardMode);
   }, [dashboardMode]);
 
+  const fetchAuthMe = useCallback(async () => {
+    if (!authEnabled) return;
+    try {
+      const res = await fetch('/api/admin/me');
+      if (!res.ok) {
+        setAuthUser(null);
+        return;
+      }
+      const json = (await res.json()) as { user?: { id: string; email: string; role: 'admin' | 'member' } };
+      setAuthUser(json.user ?? null);
+    } catch (error) {
+      console.error('Failed to fetch auth session:', error);
+      setAuthUser(null);
+    }
+  }, [authEnabled]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/auth/config');
+        const json = (await res.json()) as {
+          enabled?: boolean;
+          email_password_enabled?: boolean;
+          providers?: Array<{ id: string; label: string }>;
+        };
+        if (cancelled) return;
+        const enabled = Boolean(json?.enabled);
+        setAuthEnabled(enabled);
+        setAuthEmailPasswordEnabled(Boolean(json?.email_password_enabled));
+        setAuthProviders(json?.providers ?? []);
+        setAuthError(null);
+        if (!enabled) {
+          setAuthUser(null);
+          return;
+        }
+        await fetchAuthMe();
+      } catch (error) {
+        if (cancelled) return;
+        console.error('Failed to fetch auth config:', error);
+        setAuthEnabled(false);
+        setAuthError('Failed to load auth config');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchAuthMe]);
+
   // Support back/forward navigation if the user edits the URL or uses history.
   useEffect(() => {
     const onPopState = () => {
@@ -1708,6 +1803,7 @@ export default function App() {
   }, [tab]);
 
   const fetchData = useCallback(async () => {
+    if (!authReady) return;
     if (dropIdRef.current === null) return;
     try {
       const [tracesRes, eventsRes, statsRes] = await Promise.all([
@@ -1721,9 +1817,10 @@ export default function App() {
     } catch (error) {
       console.error('Failed to fetch data:', error);
     }
-  }, []);
+  }, [authReady]);
 
   const fetchDrops = useCallback(async () => {
+    if (!authReady) return;
     try {
       const res = await fetch('/api/drops');
       const json = (await res.json()) as { default_drop_id: number; drops: Drop[] };
@@ -1738,9 +1835,10 @@ export default function App() {
       console.error('Failed to fetch drops:', error);
       setDropId(1);
     }
-  }, []);
+  }, [authReady]);
 
   const fetchDashboards = useCallback(async () => {
+    if (!authReady) return;
     if (dropIdRef.current === null) return;
     try {
       const res = await fetch(`/api/dashboards?dropId=${dropIdRef.current}`);
@@ -1755,9 +1853,267 @@ export default function App() {
     } catch (error) {
       console.error('Failed to fetch dashboards:', error);
     }
-  }, [dashboardSelectedId]);
+  }, [dashboardSelectedId, authReady]);
+
+  const fetchServiceAccounts = useCallback(async () => {
+    if (!authActive || !authUser || !isAdmin) return;
+    try {
+      const res = await fetch('/api/admin/service-accounts');
+      if (!res.ok) throw new Error('Failed to load service accounts');
+      const rows = (await res.json()) as Array<{ id: number; name: string; created_at: number; created_by_email: string | null }>;
+      setServiceAccounts(rows);
+      if (rows.length && selectedServiceAccountId === null) {
+        setSelectedServiceAccountId(rows[0].id);
+      }
+    } catch (error) {
+      console.error('Failed to fetch service accounts:', error);
+    }
+  }, [authActive, authUser, isAdmin, selectedServiceAccountId]);
+
+  const fetchApiKeys = useCallback(async () => {
+    if (!authActive || !authUser || !isAdmin) return;
+    try {
+      const res = await fetch('/api/admin/api-keys');
+      if (!res.ok) throw new Error('Failed to load API keys');
+      const rows = (await res.json()) as Array<{
+        id: number;
+        service_account_id: number;
+        name: string | null;
+        key_prefix: string;
+        created_at: number;
+        revoked_at: number | null;
+        permissions: Array<{ drop_id: number; can_ingest: number; can_query: number }>;
+      }>;
+      setApiKeys(rows);
+    } catch (error) {
+      console.error('Failed to fetch API keys:', error);
+    }
+  }, [authActive, authUser, isAdmin]);
+
+  const refreshAuthAssets = useCallback(async () => {
+    await Promise.all([fetchServiceAccounts(), fetchApiKeys()]);
+  }, [fetchServiceAccounts, fetchApiKeys]);
+
+  const fetchUsers = useCallback(async () => {
+    if (!authActive || !authUser || !isAdmin) return;
+    try {
+      const res = await fetch('/api/admin/users');
+      if (!res.ok) throw new Error('Failed to load users');
+      const rows = (await res.json()) as Array<{
+        user_id: string;
+        email: string;
+        role: 'admin' | 'member';
+        disabled: number;
+        created_at: number;
+        last_login_at: number | null;
+      }>;
+      setUsers(rows);
+      if (rows.length > 0) {
+        if (!selectedUserId || !rows.some((u) => u.user_id === selectedUserId)) {
+          setSelectedUserId(rows[0].user_id);
+        }
+      } else {
+        setSelectedUserId(null);
+      }
+    } catch (error) {
+      console.error('Failed to fetch users:', error);
+    }
+  }, [authActive, authUser, isAdmin, selectedUserId]);
+
+  const fetchUserPermissions = useCallback(
+    async (userId: string) => {
+      if (!authActive || !authUser || !isAdmin) return;
+      try {
+        const res = await fetch(`/api/admin/users/${userId}/permissions`);
+        if (!res.ok) throw new Error('Failed to load user permissions');
+        const rows = (await res.json()) as Array<{ drop_id: number; can_ingest: number; can_query: number }>;
+        setUserPermissions(rows);
+      } catch (error) {
+        console.error('Failed to fetch user permissions:', error);
+        setUserPermissions([]);
+      }
+    },
+    [authActive, authUser, isAdmin]
+  );
+
+  const handleSaveUserProfile = useCallback(async () => {
+    if (!selectedUserId) return;
+    setUserSaving(true);
+    try {
+      const res = await fetch(`/api/admin/users/${selectedUserId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: selectedUserRole, disabled: selectedUserDisabled }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Failed to update user');
+      setUsers((prev) => prev.map((u) => (u.user_id === selectedUserId ? { ...u, ...json } : u)));
+      if (authUser && authUser.id === selectedUserId) {
+        setAuthUser({ ...authUser, role: selectedUserRole });
+      }
+      setAppToast('User updated');
+    } catch (error) {
+      console.error('Failed to update user:', error);
+      setAppToast('Failed to update user');
+    } finally {
+      setUserSaving(false);
+    }
+  }, [selectedUserId, selectedUserRole, selectedUserDisabled, authUser]);
+
+  const handleSaveUserPermissions = useCallback(async () => {
+    if (!selectedUserId) return;
+    setUserSaving(true);
+    try {
+      const permissions = drops.map((drop) => {
+        const existing = userPermissions.find((p) => p.drop_id === drop.id);
+        return {
+          drop_id: drop.id,
+          can_ingest: Boolean(existing?.can_ingest),
+          can_query: Boolean(existing?.can_query),
+        };
+      });
+      const res = await fetch(`/api/admin/users/${selectedUserId}/permissions`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permissions }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Failed to update permissions');
+      setUserPermissions(json ?? []);
+      setAppToast('Permissions updated');
+    } catch (error) {
+      console.error('Failed to update permissions:', error);
+      setAppToast('Failed to update permissions');
+    } finally {
+      setUserSaving(false);
+    }
+  }, [selectedUserId, drops, userPermissions]);
+
+  const handleLogin = useCallback(async () => {
+    if (!loginEmail || !loginPassword) {
+      setAuthError('Email and password are required');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const { error } = await authClient.signIn.email({
+        email: loginEmail,
+        password: loginPassword,
+        callbackURL: window.location.origin,
+      });
+      if (error) throw new Error(error.message || 'Login failed');
+      await fetchAuthMe();
+      setLoginPassword('');
+      setAuthError(null);
+    } catch (error) {
+      setAuthError((error as Error).message);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [loginEmail, loginPassword, authClient, fetchAuthMe]);
+
+  const handleSocialLogin = useCallback(
+    async (providerId: string) => {
+      setAuthLoading(true);
+      setAuthError(null);
+      try {
+        const { error } = await authClient.signIn.social({
+          provider: providerId,
+          callbackURL: window.location.origin,
+        });
+        if (error) throw new Error(error.message || 'Login failed');
+      } catch (error) {
+        setAuthError((error as Error).message);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authClient]
+  );
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await authClient.signOut();
+    } finally {
+      setAuthUser(null);
+      setServiceAccounts([]);
+      setApiKeys([]);
+    }
+  }, [authClient]);
+
+  const handleCreateServiceAccount = useCallback(async () => {
+    if (!newServiceAccountName.trim()) return;
+    try {
+      const res = await fetch('/api/admin/service-accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newServiceAccountName }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Failed to create service account');
+      setNewServiceAccountName('');
+      await refreshAuthAssets();
+    } catch (error) {
+      console.error('Failed to create service account:', error);
+      setAppToast('Failed to create service account');
+    }
+  }, [newServiceAccountName, refreshAuthAssets]);
+
+  const handleCreateApiKey = useCallback(async () => {
+    if (!selectedServiceAccountId) return;
+    if (!apiKeyDropId) {
+      setAppToast('Select a drop for API key permissions');
+      return;
+    }
+    if (!apiKeyCanIngest && !apiKeyCanQuery) {
+      setAppToast('Select at least one permission (ingest or query)');
+      return;
+    }
+    try {
+      const res = await fetch('/api/admin/api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service_account_id: selectedServiceAccountId,
+          name: newApiKeyName || null,
+          permissions: [
+            {
+              drop_id: apiKeyDropId,
+              can_ingest: apiKeyCanIngest,
+              can_query: apiKeyCanQuery,
+            },
+          ],
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Failed to create API key');
+      setGeneratedApiKey(json.api_key);
+      setGeneratedApiKeyMeta(`Prefix ${json.key_prefix} • SA ${json.service_account_id}`);
+      setShowApiKeyModal(true);
+      setNewApiKeyName('');
+      await refreshAuthAssets();
+    } catch (error) {
+      console.error('Failed to create API key:', error);
+      setAppToast('Failed to create API key');
+    }
+  }, [selectedServiceAccountId, apiKeyDropId, apiKeyCanIngest, apiKeyCanQuery, newApiKeyName, refreshAuthAssets]);
+
+  const handleRevokeApiKey = useCallback(async (id: number) => {
+    if (!confirm('Revoke this API key? This cannot be undone.')) return;
+    try {
+      const res = await fetch(`/api/admin/api-keys/${id}`, { method: 'DELETE' });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Failed to revoke API key');
+      await refreshAuthAssets();
+    } catch (error) {
+      console.error('Failed to revoke API key:', error);
+      setAppToast('Failed to revoke API key');
+    }
+  }, [refreshAuthAssets]);
 
   const handleSearch = useCallback(async () => {
+    if (!authReady) return;
     if (!search.trim()) {
       fetchData();
       return;
@@ -1779,9 +2135,10 @@ export default function App() {
     } catch (error) {
       console.error('Search failed:', error);
     }
-  }, [search, tab, fetchData]);
+  }, [search, tab, fetchData, authReady]);
 
   const handleClear = async () => {
+    if (!authReady) return;
     if (!confirm('Clear all traces and events?')) return;
     if (dropIdRef.current === null) return;
     await fetch(`/api/clear?dropId=${dropIdRef.current}`, { method: 'DELETE' });
@@ -1801,6 +2158,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!authReady) return;
     if (dropId === null) return;
     dropIdRef.current = dropId;
     window.localStorage.setItem('raphael.dropId', String(dropId));
@@ -1819,7 +2177,7 @@ export default function App() {
     fetchData();
     fetchDashboards();
     subscribeWs(dropId);
-  }, [dropId, drops, fetchData, subscribeWs, fetchDashboards]);
+  }, [dropId, drops, fetchData, subscribeWs, fetchDashboards, authReady]);
 
   useEffect(() => {
     if (tab !== 'dashboards') return;
@@ -1828,7 +2186,9 @@ export default function App() {
   }, [tab, dashboardSpec]);
 
   useEffect(() => {
+    if (!authReady) return;
     if (tab !== 'settings') return;
+    if (authActive && !isAdmin) return;
     void (async () => {
       try {
         const res = await fetch('/api/settings/openrouter');
@@ -1839,9 +2199,33 @@ export default function App() {
         console.error('Failed to fetch OpenRouter settings:', error);
       }
     })();
-  }, [tab]);
+  }, [tab, authReady]);
 
   useEffect(() => {
+    if (tab !== 'settings') return;
+    if (!authActive || !authUser) return;
+    void refreshAuthAssets();
+    if (isAdmin) void fetchUsers();
+  }, [tab, authActive, authUser, isAdmin, refreshAuthAssets, fetchUsers]);
+
+  useEffect(() => {
+    if (!selectedUserId) return;
+    const user = users.find((u) => u.user_id === selectedUserId);
+    if (user) {
+      setSelectedUserRole(user.role);
+      setSelectedUserDisabled(Boolean(user.disabled));
+    }
+    void fetchUserPermissions(selectedUserId);
+  }, [selectedUserId, users, fetchUserPermissions]);
+
+  useEffect(() => {
+    if (apiKeyDropId !== null) return;
+    if (dropId === null) return;
+    setApiKeyDropId(dropId);
+  }, [apiKeyDropId, dropId]);
+
+  useEffect(() => {
+    if (authActive && !authUser) return;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
 
@@ -1900,7 +2284,7 @@ export default function App() {
     return () => {
       wsRef.current?.close();
     };
-  }, [paused, subscribeWs]);
+  }, [paused, subscribeWs, authActive, authUser]);
 
   const activeFilters: FilterState =
     tab === 'events' ? eventFilters : tab === 'traces' ? traceFilters : {};
@@ -2404,6 +2788,84 @@ export default function App() {
     if (!dashboardSpec) return;
     if (dashboardSample.length > 0) return;
     await refreshDashboardSample();
+  }
+
+  if (authEnabled === null) {
+    return (
+      <div style={{ ...styles.container, alignItems: 'center', justifyContent: 'center', background: '#0b0b0b', color: '#fff' }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (authEnabled && !authUser) {
+    return (
+      <div style={{ ...styles.container, alignItems: 'center', justifyContent: 'center', background: '#0b0b0b' }}>
+        <div style={{ ...styles.pane, maxWidth: '420px', width: '100%' }}>
+          <div style={styles.paneHeader}>
+            <span style={styles.paneTitle}>Sign in</span>
+            <span style={styles.tiny}>Raphael Auth</span>
+          </div>
+          <div style={styles.paneBody}>
+            <div style={{ color: '#888', fontSize: '13px', marginBottom: '14px' }}>
+              Authentication is enabled. Sign in to continue.
+            </div>
+
+            {authProviders.length > 0 && (
+              <div style={{ display: 'grid', gap: '10px', marginBottom: authEmailPasswordEnabled ? '16px' : 0 }}>
+                {authProviders.map((provider) => (
+                  <button
+                    key={provider.id}
+                    style={styles.button}
+                    onClick={() => handleSocialLogin(provider.id)}
+                    disabled={authLoading}
+                  >
+                    Continue with {provider.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {authEmailPasswordEnabled && (
+              <div style={{ display: 'grid', gap: '10px' }}>
+                <div>
+                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Email</div>
+                  <input
+                    style={styles.filterInput}
+                    placeholder="you@example.com"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                  />
+                </div>
+                <div>
+                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Password</div>
+                  <input
+                    style={styles.filterInput}
+                    type="password"
+                    placeholder="••••••••"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                  />
+                </div>
+                <button style={styles.button} onClick={handleLogin} disabled={authLoading}>
+                  {authLoading ? 'Signing in…' : 'Sign in'}
+                </button>
+              </div>
+            )}
+
+            {!authEmailPasswordEnabled && authProviders.length === 0 && (
+              <div style={{ color: '#888', fontSize: '13px' }}>
+                No authentication providers configured. Set provider environment variables to enable login.
+              </div>
+            )}
+
+            {authError && <div style={{ color: '#f87171', fontSize: '12px', marginTop: '10px' }}>{authError}</div>}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -3282,9 +3744,10 @@ export default function App() {
                         value={newDropName}
                         onChange={(e) => setNewDropName(e.target.value)}
                         onKeyDown={(e) => e.key === 'Enter' && handleCreateDrop()}
+                        disabled={isMember}
                       />
                     </div>
-                    <button style={styles.button} onClick={handleCreateDrop} disabled={!newDropName.trim()}>
+                    <button style={styles.button} onClick={handleCreateDrop} disabled={!newDropName.trim() || isMember}>
                       Create
                     </button>
                   </div>
@@ -3316,6 +3779,7 @@ export default function App() {
                         inputMode="numeric"
                         value={retentionTracesDays}
                         onChange={(e) => setRetentionTracesDays(e.target.value)}
+                        disabled={isMember}
                       />
                     </div>
                     <div>
@@ -3325,72 +3789,379 @@ export default function App() {
                         inputMode="numeric"
                         value={retentionEventsDays}
                         onChange={(e) => setRetentionEventsDays(e.target.value)}
+                        disabled={isMember}
                       />
                     </div>
                   </div>
 
                   <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '14px' }}>
-                    <button style={styles.button} onClick={handleSaveRetention} disabled={dropId === null}>
+                    <button style={styles.button} onClick={handleSaveRetention} disabled={dropId === null || isMember}>
                       Save retention
                     </button>
                   </div>
                 </div>
               </div>
 
-              <div style={{ ...styles.pane, gridColumn: '1 / -1' }}>
-                <div style={styles.paneHeader}>
-                  <span style={styles.paneTitle}>Integrations</span>
-                  <span style={styles.tiny}>Optional</span>
-                </div>
-                <div style={styles.paneBody}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
-                    <div>
-                      <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6, marginBottom: '10px' }}>
-                        Configure OpenRouter for AI dashboard generation. Values are stored locally (API key is encrypted at rest).
+              {authActive && (
+                <div style={{ ...styles.pane, gridColumn: '1 / -1' }}>
+                  <div style={styles.paneHeader}>
+                    <span style={styles.paneTitle}>Account</span>
+                    <span style={styles.tiny}>Signed in</span>
+                  </div>
+                  <div style={styles.paneBody}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isAdmin ? '20px' : 0 }}>
+                      <div style={styles.pill}>
+                        User:
+                        <span style={{ color: '#fff' }}>{authUser?.email ?? 'unknown'}</span>
+                        <span style={{ color: '#777' }}>({authUser?.role ?? 'member'})</span>
                       </div>
-                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Model</div>
-                      <input
-                        style={styles.filterInput}
-                        placeholder="openai/gpt-4o-mini"
-                        value={openRouterModel}
-                        onChange={(e) => setOpenRouterModel(e.target.value)}
-                      />
-                      <div style={{ ...styles.metaLabel, marginTop: '12px', marginBottom: '6px' }}>API key</div>
-                      <input
-                        style={styles.filterInput}
-                        type="password"
-                        placeholder={openRouterApiKeySet ? '•••••••• (set)' : 'Paste OPENROUTER_API_KEY'}
-                        value={openRouterApiKey}
-                        onChange={(e) => setOpenRouterApiKey(e.target.value)}
-                      />
-                      <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
-                        {openRouterApiKeySet && (
-                          <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={clearOpenRouterKey} disabled={openRouterSaving}>
-                            Clear key
-                          </button>
-                        )}
-                        <button style={styles.button} onClick={saveOpenRouterSettings} disabled={openRouterSaving}>
-                          {openRouterSaving ? 'Saving…' : 'Save'}
-                        </button>
-                      </div>
+                      <button style={styles.button} onClick={handleLogout}>
+                        Sign out
+                      </button>
                     </div>
 
-                    <div>
-                      <div style={styles.pill}>
-                        Status:
-                        <span style={{ color: '#fff' }}>{openRouterApiKeySet ? 'API key set' : 'No API key'}</span>
+                    {isAdmin && (
+                      <>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start', marginBottom: '20px' }}>
+                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
+                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>Users</div>
+                            <div style={{ display: 'grid', gap: '8px' }}>
+                              {users.length === 0 ? (
+                                <div style={styles.tiny}>No users yet.</div>
+                              ) : (
+                                users.map((user) => (
+                                  <div
+                                    key={user.user_id}
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      padding: '8px 10px',
+                                      borderRadius: '8px',
+                                      border: '1px solid #222',
+                                      background: selectedUserId === user.user_id ? '#151515' : '#0f0f0f',
+                                      cursor: 'pointer',
+                                    }}
+                                    onClick={() => setSelectedUserId(user.user_id)}
+                                  >
+                                    <div>
+                                      <div style={{ color: '#fff', fontWeight: 600 }}>{user.email}</div>
+                                      <div style={styles.tiny}>
+                                        {user.role} • {user.disabled ? 'disabled' : 'active'}
+                                      </div>
+                                    </div>
+                                    <span style={styles.tiny}>#{user.user_id.slice(0, 6)}</span>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
+                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>Selected User</div>
+                            {!selectedUserId ? (
+                              <div style={styles.tiny}>Select a user to edit.</div>
+                            ) : (
+                              <div style={{ display: 'grid', gap: '10px' }}>
+                                <div>
+                                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Role</div>
+                                  <select
+                                    style={styles.select}
+                                    value={selectedUserRole}
+                                    onChange={(e) => setSelectedUserRole(e.target.value === 'admin' ? 'admin' : 'member')}
+                                  >
+                                    <option value="member">Member</option>
+                                    <option value="admin">Admin</option>
+                                  </select>
+                                </div>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedUserDisabled}
+                                    onChange={(e) => setSelectedUserDisabled(e.target.checked)}
+                                  />
+                                  Disabled
+                                </label>
+                                <button style={styles.button} onClick={handleSaveUserProfile} disabled={userSaving}>
+                                  {userSaving ? 'Saving…' : 'Save User'}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111', marginBottom: '20px' }}>
+                          <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>User Drop Permissions</div>
+                          {!selectedUserId ? (
+                            <div style={styles.tiny}>Select a user to manage permissions.</div>
+                          ) : drops.length === 0 ? (
+                            <div style={styles.tiny}>No drops available.</div>
+                          ) : (
+                            <div style={{ display: 'grid', gap: '10px' }}>
+                              {drops.map((drop) => {
+                                const existing = userPermissions.find((p) => p.drop_id === drop.id);
+                                return (
+                                  <div
+                                    key={drop.id}
+                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', border: '1px solid #222', padding: '8px 10px', borderRadius: '8px' }}
+                                  >
+                                    <div style={{ color: '#fff' }}>{drop.name}</div>
+                                    <div style={{ display: 'flex', gap: '12px' }}>
+                                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={Boolean(existing?.can_ingest)}
+                                          onChange={(e) => {
+                                            const canIngest = e.target.checked;
+                                            setUserPermissions((prev) => {
+                                              const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                              return [...rest, { drop_id: drop.id, can_ingest: canIngest ? 1 : 0, can_query: existing?.can_query ?? 0 }];
+                                            });
+                                          }}
+                                        />
+                                        Ingest
+                                      </label>
+                                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={Boolean(existing?.can_query)}
+                                          onChange={(e) => {
+                                            const canQuery = e.target.checked;
+                                            setUserPermissions((prev) => {
+                                              const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                              return [...rest, { drop_id: drop.id, can_ingest: existing?.can_ingest ?? 0, can_query: canQuery ? 1 : 0 }];
+                                            });
+                                          }}
+                                        />
+                                        Query
+                                      </label>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                <button style={styles.button} onClick={handleSaveUserPermissions} disabled={userSaving}>
+                                  {userSaving ? 'Saving…' : 'Save Permissions'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
+                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>Service Accounts</div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'end' }}>
+                              <div>
+                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>New service account</div>
+                                <input
+                                  style={styles.filterInput}
+                                  placeholder="e.g., api-gateway"
+                                  value={newServiceAccountName}
+                                  onChange={(e) => setNewServiceAccountName(e.target.value)}
+                                  onKeyDown={(e) => e.key === 'Enter' && handleCreateServiceAccount()}
+                                />
+                              </div>
+                              <button style={styles.button} onClick={handleCreateServiceAccount} disabled={!newServiceAccountName.trim()}>
+                                Create
+                              </button>
+                            </div>
+
+                            <div style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
+                              {serviceAccounts.length === 0 ? (
+                                <div style={styles.tiny}>No service accounts yet.</div>
+                              ) : (
+                                serviceAccounts.map((sa) => (
+                                  <div
+                                    key={sa.id}
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      padding: '8px 10px',
+                                      borderRadius: '8px',
+                                      border: '1px solid #222',
+                                      background: selectedServiceAccountId === sa.id ? '#151515' : '#0f0f0f',
+                                      cursor: 'pointer',
+                                    }}
+                                    onClick={() => setSelectedServiceAccountId(sa.id)}
+                                  >
+                                    <div>
+                                      <div style={{ color: '#fff', fontWeight: 600 }}>{sa.name}</div>
+                                      <div style={styles.tiny}>
+                                        Created by {sa.created_by_email ?? 'unknown'} • {new Date(sa.created_at).toLocaleString()}
+                                      </div>
+                                    </div>
+                                    <span style={styles.tiny}>#{sa.id}</span>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
+                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>API Keys</div>
+                            <div style={{ display: 'grid', gap: '10px' }}>
+                              <div>
+                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Service account</div>
+                                <select
+                                  style={styles.select}
+                                  value={selectedServiceAccountId ?? ''}
+                                  onChange={(e) => setSelectedServiceAccountId(Number(e.target.value))}
+                                  disabled={serviceAccounts.length === 0}
+                                >
+                                  {serviceAccounts.map((sa) => (
+                                    <option key={sa.id} value={sa.id}>
+                                      {sa.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Drop</div>
+                                <select
+                                  style={styles.select}
+                                  value={apiKeyDropId ?? ''}
+                                  onChange={(e) => setApiKeyDropId(Number(e.target.value))}
+                                  disabled={drops.length === 0}
+                                >
+                                  {drops.map((d) => (
+                                    <option key={d.id} value={d.id}>
+                                      {d.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Name (optional)</div>
+                                <input
+                                  style={styles.filterInput}
+                                  placeholder="e.g., staging-ingest"
+                                  value={newApiKeyName}
+                                  onChange={(e) => setNewApiKeyName(e.target.value)}
+                                />
+                              </div>
+                              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={apiKeyCanIngest}
+                                    onChange={(e) => setApiKeyCanIngest(e.target.checked)}
+                                  />
+                                  Ingest
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={apiKeyCanQuery}
+                                    onChange={(e) => setApiKeyCanQuery(e.target.checked)}
+                                  />
+                                  Query
+                                </label>
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                <button style={styles.button} onClick={handleCreateApiKey} disabled={!selectedServiceAccountId || !apiKeyDropId}>
+                                  Create API key
+                                </button>
+                              </div>
+                            </div>
+
+                            <div style={{ marginTop: '14px', display: 'grid', gap: '8px' }}>
+                              {apiKeys.length === 0 ? (
+                                <div style={styles.tiny}>No API keys yet.</div>
+                              ) : (
+                                apiKeys.map((key) => (
+                                  <div key={key.id} style={{ border: '1px solid #222', borderRadius: '8px', padding: '8px 10px' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                                      <div style={{ color: '#fff', fontWeight: 600 }}>
+                                        {key.name || 'API key'} • {key.key_prefix}…
+                                      </div>
+                                      <div style={styles.tiny}>#{key.id}</div>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '6px' }}>
+                                      {key.permissions.map((p) => (
+                                        <span key={`${key.id}-${p.drop_id}`} style={styles.pill}>
+                                          Drop #{p.drop_id}: {p.can_ingest ? 'ingest' : ''}{p.can_ingest && p.can_query ? ', ' : ''}{p.can_query ? 'query' : ''}
+                                        </span>
+                                      ))}
+                                      {key.revoked_at && <span style={{ ...styles.pill, color: '#fca5a5', borderColor: '#7f1d1d' }}>Revoked</span>}
+                                    </div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                                      <div style={styles.tiny}>Created {new Date(key.created_at).toLocaleString()}</div>
+                                      {!key.revoked_at && (
+                                        <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={() => handleRevokeApiKey(key.id)}>
+                                          Revoke
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {(!authActive || isAdmin) && (
+                <div style={{ ...styles.pane, gridColumn: '1 / -1' }}>
+                  <div style={styles.paneHeader}>
+                    <span style={styles.paneTitle}>Integrations</span>
+                    <span style={styles.tiny}>Optional</span>
+                  </div>
+                  <div style={styles.paneBody}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                      <div>
+                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6, marginBottom: '10px' }}>
+                          Configure OpenRouter for AI dashboard generation. Values are stored locally (API key is encrypted at rest).
+                        </div>
+                        <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Model</div>
+                        <input
+                          style={styles.filterInput}
+                          placeholder="openai/gpt-4o-mini"
+                          value={openRouterModel}
+                          onChange={(e) => setOpenRouterModel(e.target.value)}
+                        />
+                        <div style={{ ...styles.metaLabel, marginTop: '12px', marginBottom: '6px' }}>API key</div>
+                        <input
+                          style={styles.filterInput}
+                          type="password"
+                          placeholder={openRouterApiKeySet ? '•••••••• (set)' : 'Paste OPENROUTER_API_KEY'}
+                          value={openRouterApiKey}
+                          onChange={(e) => setOpenRouterApiKey(e.target.value)}
+                        />
+                        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
+                          {openRouterApiKeySet && (
+                            <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={clearOpenRouterKey} disabled={openRouterSaving}>
+                              Clear key
+                            </button>
+                          )}
+                          <button style={styles.button} onClick={saveOpenRouterSettings} disabled={openRouterSaving}>
+                            {openRouterSaving ? 'Saving…' : 'Save'}
+                          </button>
+                        </div>
                       </div>
-                      <div style={{ marginTop: '12px', color: '#888', fontSize: '13px', lineHeight: 1.6 }}>
-                        Notes:
-                        <ul style={{ marginTop: '8px', paddingLeft: '18px', color: '#aaa' }}>
-                          <li>Key is never returned to the browser once saved.</li>
-                          <li>You can still override via server env vars if you want.</li>
-                        </ul>
+
+                      <div>
+                        <div style={styles.pill}>
+                          Status:
+                          <span style={{ color: '#fff' }}>{openRouterApiKeySet ? 'API key set' : 'No API key'}</span>
+                        </div>
+                        <div style={{ marginTop: '12px', color: '#888', fontSize: '13px', lineHeight: 1.6 }}>
+                          Notes:
+                          <ul style={{ marginTop: '8px', paddingLeft: '18px', color: '#aaa' }}>
+                            <li>Key is never returned to the browser once saved.</li>
+                            <li>You can still override via server env vars if you want.</li>
+                          </ul>
+                        </div>
                       </div>
                     </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
           ) : tab === 'events' ? (
             events.length === 0 ? (
@@ -3564,6 +4335,51 @@ export default function App() {
                 </button>
                 <button style={styles.button} onClick={generateDashboard} disabled={dropId === null}>
                   Generate
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showApiKeyModal && generatedApiKey && (
+        <div style={styles.modal} onClick={() => setShowApiKeyModal(false)}>
+          <div style={styles.modalSmallContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>API Key Created</span>
+              <div style={styles.modalActions}>
+                <button style={styles.button} onClick={() => setShowApiKeyModal(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div style={styles.modalBody}>
+              <div style={{ color: '#888', fontSize: '13px', marginBottom: '10px' }}>
+                This key is shown once. Copy it now and store it securely.
+              </div>
+              {generatedApiKeyMeta && <div style={{ ...styles.tiny, marginBottom: '8px' }}>{generatedApiKeyMeta}</div>}
+              <div style={{ ...styles.metaValue, background: '#0f0f0f', border: '1px solid #222', borderRadius: '8px', padding: '10px' }}>
+                {generatedApiKey}
+              </div>
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
+                <button
+                  style={styles.button}
+                  onClick={() => {
+                    navigator.clipboard.writeText(generatedApiKey);
+                    setAppToast('API key copied');
+                  }}
+                >
+                  Copy
+                </button>
+                <button
+                  style={styles.button}
+                  onClick={() => {
+                    setShowApiKeyModal(false);
+                    setGeneratedApiKey(null);
+                    setGeneratedApiKeyMeta(null);
+                  }}
+                >
+                  Done
                 </button>
               </div>
             </div>

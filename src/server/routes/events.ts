@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { ensureDrop, insertWideEventRow } from '../db/sqlite.js';
+import { insertWideEventRow, resolveDropId } from '../db/sqlite.js';
 import { broadcast } from '../websocket.js';
+import { authEnabled, noteApiKeyUsageDrop, requireAuth, requireDropAccess } from '../auth.js';
 
 export const eventsRouter = Router();
 
@@ -19,8 +20,17 @@ interface WideEvent {
 
 // Wide events receiver - accepts array of events
 eventsRouter.post('/v1/events', (req: Request, res: Response) => {
+  if (!requireAuth(req, res)) return;
   try {
-    const dropId = ensureDrop((req.header('x-raphael-drop') || (req.query.drop as string) || '').toString());
+    const rawDrop = (req.header('x-raphael-drop') || (req.query.drop as string) || '').toString();
+    const allowCreate = !authEnabled() || req.auth?.user?.role === 'admin';
+    const dropId = resolveDropId(rawDrop, allowCreate);
+    if (dropId === null) {
+      res.status(404).json({ error: 'Drop not found' });
+      return;
+    }
+    noteApiKeyUsageDrop(req, dropId);
+    if (!requireDropAccess(req, res, dropId, 'ingest')) return;
     const events = Array.isArray(req.body) ? req.body : [req.body];
     const insertedEvents: unknown[] = [];
 
@@ -80,8 +90,17 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
 
 // Also support OTLP logs format (for compatibility with existing WideEventEmitter)
 eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
+  if (!requireAuth(req, res)) return;
   try {
-    const dropId = ensureDrop((req.header('x-raphael-drop') || (req.query.drop as string) || '').toString());
+    const rawDrop = (req.header('x-raphael-drop') || (req.query.drop as string) || '').toString();
+    const allowCreate = !authEnabled() || req.auth?.user?.role === 'admin';
+    const dropId = resolveDropId(rawDrop, allowCreate);
+    if (dropId === null) {
+      res.status(404).json({ error: 'Drop not found' });
+      return;
+    }
+    noteApiKeyUsageDrop(req, dropId);
+    if (!requireDropAccess(req, res, dropId, 'ingest')) return;
     const body = req.body;
     const insertedEvents: unknown[] = [];
 
