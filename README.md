@@ -96,6 +96,8 @@ curl -X POST http://localhost:6274/v1/events \
 | `/api/drops` | GET | List drops (when auth is enabled, only drops you can query) |
 | `/api/drops` | POST | Create a drop (admin only when auth is enabled) |
 | `/api/drops/:dropId/retention` | PUT | Update per-drop retention (admin only when auth is enabled) |
+| `/api/drops/:dropId/label` | PUT | Update a drop label (admin only when auth is enabled) |
+| `/api/drops/:dropId` | DELETE | Delete a drop and all its data (admin only when auth is enabled) |
 | `/api/auth/config` | GET | Auth configuration summary for the UI |
 | `/api/auth/*` | POST/GET | BetterAuth endpoints (sign-in, callbacks, sessions) |
 | `/api/admin/*` | GET/POST/PATCH/DELETE | Admin endpoints (users, per-user drop permissions, OAuth allowlist policy; only meaningful when auth is enabled) |
