@@ -1,9 +1,38 @@
 import { Router, Request, Response } from 'express';
-import { insertWideEventRow, resolveDropId } from '../db/sqlite.js';
-import { broadcast } from '../websocket.js';
+import { insertWideEventRows, resolveDropId, type WideEventInsertRow } from '../db/sqlite.js';
+import { broadcast, hasSubscribers } from '../websocket.js';
 import { authEnabled, noteApiKeyUsageDrop, requireAuth, requireDropAccess } from '../auth.js';
 
 export const eventsRouter = Router();
+
+function parsePositiveInt(raw: unknown, fallback: number) {
+  const n = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
+}
+
+function makeRingBuffer<T>(max: number) {
+  const buf: T[] = [];
+  let start = 0;
+  return {
+    push(item: T) {
+      if (max <= 0) return;
+      if (buf.length < max) buf.push(item);
+      else {
+        buf[start] = item;
+        start = (start + 1) % max;
+      }
+    },
+    toArray() {
+      if (buf.length === 0) return [];
+      if (buf.length < max) return buf.slice();
+      return buf.slice(start).concat(buf.slice(0, start));
+    },
+    size() {
+      return buf.length;
+    },
+  };
+}
 
 interface WideEvent {
   trace_id?: string;
@@ -32,53 +61,70 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
     noteApiKeyUsageDrop(req, dropId);
     if (!requireDropAccess(req, res, dropId, 'ingest')) return;
     const events = Array.isArray(req.body) ? req.body : [req.body];
-    const insertedEvents: unknown[] = [];
+    const rows: WideEventInsertRow[] = [];
+
+    const shouldBroadcast = hasSubscribers(dropId);
+    const maxBroadcast = parsePositiveInt(process.env.RAPHAEL_INGEST_BROADCAST_MAX_ITEMS, 500);
+    const batchSize = parsePositiveInt(process.env.RAPHAEL_INGEST_BROADCAST_BATCH_SIZE, 200);
+    const broadcastBuf = shouldBroadcast ? makeRingBuffer<any>(maxBroadcast) : null;
+    const createdAt = Date.now();
 
     for (const event of events as WideEvent[]) {
       const traceId = event.trace_id || null;
-      const serviceName = event['service.name'] || 'unknown';
-      const operationType = event['graphql.operation_type'] || null;
-      const fieldName = event['graphql.field_name'] || null;
-      const outcome = event.outcome || 'unknown';
-      const durationMs = event['duration.total_ms'] || null;
-      const userId = event['user.id'] || null;
-      const errorCount = event.error_count || 0;
-      const rpcCallCount = event['count.rpc_calls'] || 0;
-      const attributes = JSON.stringify(event);
+      const serviceName = (event['service.name'] ?? 'unknown') as any;
+      const operationType = (event['graphql.operation_type'] ?? null) as any;
+      const fieldName = (event['graphql.field_name'] ?? null) as any;
+      const outcome = (event.outcome ?? 'unknown') as any;
+      const durationMs = (event['duration.total_ms'] ?? null) as any;
+      const userId = (event['user.id'] ?? null) as any;
+      const errorCount = Number(event.error_count ?? 0) || 0;
+      const rpcCallCount = Number(event['count.rpc_calls'] ?? 0) || 0;
+      const attributes = JSON.stringify(event ?? {}) ?? '{}';
+      const durationNum = durationMs === null ? null : Number(durationMs);
+      const durationValue = durationNum !== null && Number.isFinite(durationNum) ? durationNum : null;
 
-      insertWideEventRow(
-        dropId,
-        traceId,
-        serviceName,
-        operationType,
-        fieldName,
-        outcome,
-        durationMs,
-        userId,
-        errorCount,
-        rpcCallCount,
-        attributes
-      );
-
-      insertedEvents.push({
+      rows.push({
         drop_id: dropId,
         trace_id: traceId,
-        service_name: serviceName,
-        operation_type: operationType,
-        field_name: fieldName,
-        outcome,
-        duration_ms: durationMs,
-        user_id: userId,
+        service_name: String(serviceName ?? 'unknown'),
+        operation_type: operationType === null ? null : String(operationType),
+        field_name: fieldName === null ? null : String(fieldName),
+        outcome: String(outcome ?? 'unknown'),
+        duration_ms: durationValue,
+        user_id: userId === null ? null : String(userId),
         error_count: errorCount,
         rpc_call_count: rpcCallCount,
         attributes,
-        created_at: Date.now(),
       });
+
+      if (broadcastBuf) {
+        broadcastBuf.push({
+          drop_id: dropId,
+          trace_id: traceId,
+          service_name: String(serviceName ?? 'unknown'),
+          operation_type: operationType === null ? null : String(operationType),
+          field_name: fieldName === null ? null : String(fieldName),
+          outcome: String(outcome ?? 'unknown'),
+          duration_ms: durationValue,
+          user_id: userId === null ? null : String(userId),
+          error_count: errorCount,
+          rpc_call_count: rpcCallCount,
+          attributes,
+          created_at: createdAt,
+        });
+      }
     }
 
-    // Broadcast to connected clients
-    if (insertedEvents.length > 0) {
-      broadcast({ type: 'wide_events', drop_id: dropId, data: insertedEvents }, dropId);
+    if (rows.length > 0) {
+      insertWideEventRows(rows);
+    }
+
+    // Broadcast to connected clients (capped + batched).
+    if (broadcastBuf && broadcastBuf.size() > 0) {
+      const data = broadcastBuf.toArray();
+      for (let i = 0; i < data.length; i += batchSize) {
+        broadcast({ type: 'wide_events', drop_id: dropId, data: data.slice(i, i + batchSize) }, dropId);
+      }
     }
 
     res.status(200).json({ received: events.length });
@@ -102,7 +148,13 @@ eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
     noteApiKeyUsageDrop(req, dropId);
     if (!requireDropAccess(req, res, dropId, 'ingest')) return;
     const body = req.body;
-    const insertedEvents: unknown[] = [];
+    const rows: WideEventInsertRow[] = [];
+
+    const shouldBroadcast = hasSubscribers(dropId);
+    const maxBroadcast = parsePositiveInt(process.env.RAPHAEL_INGEST_BROADCAST_MAX_ITEMS, 500);
+    const batchSize = parsePositiveInt(process.env.RAPHAEL_INGEST_BROADCAST_BATCH_SIZE, 200);
+    const broadcastBuf = shouldBroadcast ? makeRingBuffer<any>(maxBroadcast) : null;
+    const createdAt = Date.now();
 
     if (body.resourceLogs) {
       for (const resourceLog of body.resourceLogs) {
@@ -118,48 +170,61 @@ eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
               const operationType = attrs['graphql.operation_type'] as string || null;
               const fieldName = attrs['graphql.field_name'] as string || null;
               const outcome = attrs['outcome'] as string || 'unknown';
-              const durationMs = attrs['duration.total_ms'] as number || null;
+              const durationMsRaw = (attrs as any)['duration.total_ms'];
+              const durationMsNum = durationMsRaw === undefined || durationMsRaw === null ? null : Number(durationMsRaw);
+              const durationMs = durationMsNum !== null && Number.isFinite(durationMsNum) ? durationMsNum : null;
               const userId = attrs['user.id'] as string || null;
-              const errorCount = attrs['error_count'] as number || 0;
-              const rpcCallCount = attrs['count.rpc_calls'] as number || 0;
+              const errorCount = Number((attrs as any)['error_count'] ?? 0) || 0;
+              const rpcCallCount = Number((attrs as any)['count.rpc_calls'] ?? 0) || 0;
 
-              insertWideEventRow(
-                dropId,
-                traceId,
-                serviceName,
-                operationType,
-                fieldName,
-                outcome,
-                durationMs,
-                userId,
-                errorCount,
-                rpcCallCount,
-                JSON.stringify(attrs)
-              );
+              const attributes = JSON.stringify(attrs);
 
-              insertedEvents.push({
+              rows.push({
                 drop_id: dropId,
                 trace_id: traceId,
-                service_name: serviceName,
+                service_name: String(serviceName ?? 'unknown'),
                 operation_type: operationType,
                 field_name: fieldName,
-                outcome,
+                outcome: String(outcome ?? 'unknown'),
                 duration_ms: durationMs,
                 user_id: userId,
                 error_count: errorCount,
                 rpc_call_count: rpcCallCount,
-                attributes: JSON.stringify(attrs),
-                created_at: Date.now(),
+                attributes,
               });
+
+              if (broadcastBuf) {
+                broadcastBuf.push({
+                  drop_id: dropId,
+                  trace_id: traceId,
+                  service_name: String(serviceName ?? 'unknown'),
+                  operation_type: operationType,
+                  field_name: fieldName,
+                  outcome: String(outcome ?? 'unknown'),
+                  duration_ms: durationMs,
+                  user_id: userId,
+                  error_count: errorCount,
+                  rpc_call_count: rpcCallCount,
+                  attributes,
+                  created_at: createdAt,
+                });
+              }
             }
           }
         }
       }
     }
 
-    // Broadcast to connected clients
-    if (insertedEvents.length > 0) {
-      broadcast({ type: 'wide_events', drop_id: dropId, data: insertedEvents }, dropId);
+    if (rows.length > 0) {
+      insertWideEventRows(rows);
+    }
+
+    // Broadcast to connected clients (capped + batched).
+    if (broadcastBuf && broadcastBuf.size() > 0) {
+      const data = broadcastBuf.toArray();
+      for (let i = 0; i < data.length; i += batchSize) {
+        broadcast({ type: 'wide_events', drop_id: dropId, data: data.slice(i, i + batchSize) }, dropId);
+      }
     }
 
     res.status(200).json({ partialSuccess: {} });

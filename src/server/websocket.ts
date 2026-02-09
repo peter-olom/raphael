@@ -7,6 +7,21 @@ import { fromNodeHeaders } from 'better-auth/node';
 let wss: WebSocketServer;
 const subscriptions = new WeakMap<WebSocket, number>();
 const contexts = new WeakMap<WebSocket, { userId: string | null; role: 'admin' | 'member' | null }>();
+const subscriberCounts = new Map<number, number>();
+
+function incSubscribers(dropId: number) {
+  subscriberCounts.set(dropId, (subscriberCounts.get(dropId) ?? 0) + 1);
+}
+
+function decSubscribers(dropId: number) {
+  const next = (subscriberCounts.get(dropId) ?? 0) - 1;
+  if (next <= 0) subscriberCounts.delete(dropId);
+  else subscriberCounts.set(dropId, next);
+}
+
+export function hasSubscribers(dropId: number) {
+  return (subscriberCounts.get(dropId) ?? 0) > 0;
+}
 
 export function setupWebSocket(server: Server) {
   wss = new WebSocketServer({ server, path: '/ws' });
@@ -36,8 +51,11 @@ export function setupWebSocket(server: Server) {
 
     console.log('Client connected');
     subscriptions.set(ws, DEFAULT_DROP_ID);
+    incSubscribers(DEFAULT_DROP_ID);
 
     ws.on('close', () => {
+      const current = subscriptions.get(ws) ?? DEFAULT_DROP_ID;
+      decSubscribers(current);
       console.log('Client disconnected');
     });
 
@@ -62,6 +80,11 @@ export function setupWebSocket(server: Server) {
               ws.send(JSON.stringify({ type: 'error', error: 'Drop access denied' }));
               return;
             }
+          }
+          const prev = subscriptions.get(ws) ?? DEFAULT_DROP_ID;
+          if (prev !== dropId) {
+            decSubscribers(prev);
+            incSubscribers(dropId);
           }
           subscriptions.set(ws, dropId);
           ws.send(JSON.stringify({ type: 'subscribed', drop_id: dropId }));

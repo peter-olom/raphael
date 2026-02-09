@@ -124,6 +124,13 @@ curl -X POST http://localhost:6274/v1/events \
 | `BETTER_AUTH_SECRET` | `""` | Required in production, 32+ chars |
 | `BETTER_AUTH_BASE_URL` | `""` | Base URL for OAuth callbacks and redirects (recommended) |
 | `BETTER_AUTH_URL` | `""` | Legacy base URL env var (fallback) |
+| `RAPHAEL_SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite durability vs throughput (`FULL`, `NORMAL`, `OFF`) |
+| `RAPHAEL_SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite busy timeout (reduces transient “database is locked”) |
+| `RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000` | WAL autocheckpoint pages (prevents unbounded WAL growth) |
+| `RAPHAEL_INGEST_BROADCAST_MAX_ITEMS` | `500` | Max rows broadcast per ingest request (caps WS payload size) |
+| `RAPHAEL_INGEST_BROADCAST_BATCH_SIZE` | `200` | Rows per WebSocket message (batches WS frames) |
+| `RAPHAEL_PRUNE_BATCH_SIZE` | `5000` | Retention delete batch size (chunked deletes) |
+| `RAPHAEL_PRUNE_MAX_RUNTIME_MS` | `250` | Time budget per pruning run (avoids long write locks) |
 
 ## Tech Stack
 

@@ -5,6 +5,33 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DB_PATH = process.env.RAPHAEL_DB_PATH || path.join(__dirname, '../../../data/raphael.db');
 
+function parsePositiveInt(raw: unknown, fallback: number) {
+  const n = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
+}
+
+function parseSqliteSynchronous(raw: unknown): 'FULL' | 'NORMAL' | 'OFF' {
+  const v = String(raw ?? '').trim().toUpperCase();
+  if (v === 'FULL' || v === 'NORMAL' || v === 'OFF') return v;
+  return 'NORMAL';
+}
+
+// Keep main DB + auth DB consistent.
+export function applySqlitePragmas(db: any) {
+  // WAL is required for decent concurrent read/write behavior.
+  db.pragma('journal_mode = WAL');
+
+  const sync = parseSqliteSynchronous(process.env.RAPHAEL_SQLITE_SYNCHRONOUS);
+  db.pragma(`synchronous = ${sync}`);
+
+  const busyTimeoutMs = parsePositiveInt(process.env.RAPHAEL_SQLITE_BUSY_TIMEOUT_MS, 5000);
+  db.pragma(`busy_timeout = ${busyTimeoutMs}`);
+
+  const walAutocheckpointPages = parsePositiveInt(process.env.RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES, 1000);
+  db.pragma(`wal_autocheckpoint = ${walAutocheckpointPages}`);
+}
+
 // Ensure data directory exists
 import fs from 'fs';
 const dataDir = path.dirname(DB_PATH);
@@ -13,9 +40,7 @@ if (!fs.existsSync(dataDir)) {
 }
 
 const db = new Database(DB_PATH);
-
-// Enable WAL mode for better concurrent performance
-db.pragma('journal_mode = WAL');
+applySqlitePragmas(db);
 
 const DEFAULT_TRACES_RETENTION_MS = 3 * 24 * 60 * 60 * 1000; // 3d
 const DEFAULT_EVENTS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7d
@@ -360,6 +385,80 @@ const insertWideEventStmt = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
+export type TraceInsertRow = {
+  drop_id: number;
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  service_name: string;
+  operation_name: string;
+  start_time: number;
+  end_time: number | null;
+  duration_ms: number | null;
+  status: string;
+  attributes: string;
+};
+
+export type WideEventInsertRow = {
+  drop_id: number;
+  trace_id: string | null;
+  service_name: string;
+  operation_type: string | null;
+  field_name: string | null;
+  outcome: string;
+  duration_ms: number | null;
+  user_id: string | null;
+  error_count: number;
+  rpc_call_count: number;
+  attributes: string;
+};
+
+const insertTracesTx = db.transaction((rows: TraceInsertRow[]) => {
+  for (const r of rows) {
+    insertTraceStmt.run(
+      r.drop_id,
+      r.trace_id,
+      r.span_id,
+      r.parent_span_id,
+      r.service_name,
+      r.operation_name,
+      r.start_time,
+      r.end_time,
+      r.duration_ms,
+      r.status,
+      r.attributes
+    );
+  }
+});
+
+const insertWideEventsTx = db.transaction((rows: WideEventInsertRow[]) => {
+  for (const r of rows) {
+    insertWideEventStmt.run(
+      r.drop_id,
+      r.trace_id,
+      r.service_name,
+      r.operation_type,
+      r.field_name,
+      r.outcome,
+      r.duration_ms,
+      r.user_id,
+      r.error_count,
+      r.rpc_call_count,
+      r.attributes
+    );
+  }
+});
+
+export function insertTraceRows(rows: TraceInsertRow[]) {
+  if (rows.length === 0) return;
+  insertTracesTx(rows);
+}
+
+export function insertWideEventRows(rows: WideEventInsertRow[]) {
+  if (rows.length === 0) return;
+  insertWideEventsTx(rows);
+}
+
 export function insertTraceRow(
   dropId: number,
   traceId: string,
@@ -373,19 +472,21 @@ export function insertTraceRow(
   status: string,
   attributes: string
 ) {
-  insertTraceStmt.run(
-    dropId,
-    traceId,
-    spanId,
-    parentSpanId,
-    serviceName,
-    operationName,
-    startTime,
-    endTime,
-    durationMs,
-    status,
-    attributes
-  );
+  insertTraceRows([
+    {
+      drop_id: dropId,
+      trace_id: traceId,
+      span_id: spanId,
+      parent_span_id: parentSpanId,
+      service_name: serviceName,
+      operation_name: operationName,
+      start_time: startTime,
+      end_time: endTime,
+      duration_ms: durationMs,
+      status,
+      attributes,
+    },
+  ]);
 }
 
 export function insertWideEventRow(
@@ -401,19 +502,21 @@ export function insertWideEventRow(
   rpcCallCount: number,
   attributes: string
 ) {
-  insertWideEventStmt.run(
-    dropId,
-    traceId,
-    serviceName,
-    operationType,
-    fieldName,
-    outcome,
-    durationMs,
-    userId,
-    errorCount,
-    rpcCallCount,
-    attributes
-  );
+  insertWideEventRows([
+    {
+      drop_id: dropId,
+      trace_id: traceId,
+      service_name: serviceName,
+      operation_type: operationType,
+      field_name: fieldName,
+      outcome,
+      duration_ms: durationMs,
+      user_id: userId,
+      error_count: errorCount,
+      rpc_call_count: rpcCallCount,
+      attributes,
+    },
+  ]);
 }
 
 // Query helpers
@@ -653,13 +756,36 @@ export function getDropRetention(dropId: number) {
     | undefined;
 }
 
-const deleteOldTraces = db.prepare(`DELETE FROM traces WHERE drop_id = ? AND created_at < ?`);
-const deleteOldEvents = db.prepare(`DELETE FROM wide_events WHERE drop_id = ? AND created_at < ?`);
+const deleteOldTracesBatch = db.prepare(`
+  DELETE FROM traces
+  WHERE rowid IN (
+    SELECT rowid
+    FROM traces
+    WHERE drop_id = ? AND created_at < ?
+    ORDER BY created_at ASC
+    LIMIT ?
+  )
+`);
+
+const deleteOldEventsBatch = db.prepare(`
+  DELETE FROM wide_events
+  WHERE rowid IN (
+    SELECT rowid
+    FROM wide_events
+    WHERE drop_id = ? AND created_at < ?
+    ORDER BY created_at ASC
+    LIMIT ?
+  )
+`);
 
 export function pruneByRetention(dropId?: number, now = Date.now()) {
   const drops = dropId === undefined ? (db.prepare(`SELECT id FROM drops`).all() as Array<{ id: number }>) : [{ id: dropId }];
 
   const results: Array<{ drop_id: number; traces_deleted: number; events_deleted: number }> = [];
+
+  const batchSize = parsePositiveInt(process.env.RAPHAEL_PRUNE_BATCH_SIZE, 5000);
+  const maxRuntimeMs = parsePositiveInt(process.env.RAPHAEL_PRUNE_MAX_RUNTIME_MS, 250);
+  const deadline = Date.now() + maxRuntimeMs;
 
   for (const d of drops) {
     const retention = getDropRetention(d.id);
@@ -674,10 +800,29 @@ export function pruneByRetention(dropId?: number, now = Date.now()) {
         ? now - retention.events_retention_ms
         : null;
 
-    const tracesDeleted = tracesCutoff === null ? 0 : deleteOldTraces.run(d.id, tracesCutoff).changes;
-    const eventsDeleted = eventsCutoff === null ? 0 : deleteOldEvents.run(d.id, eventsCutoff).changes;
+    let tracesDeleted = 0;
+    let eventsDeleted = 0;
+
+    if (tracesCutoff !== null) {
+      while (Date.now() < deadline) {
+        const changes = deleteOldTracesBatch.run(d.id, tracesCutoff, batchSize).changes;
+        tracesDeleted += changes;
+        if (changes === 0) break;
+      }
+    }
+
+    if (eventsCutoff !== null) {
+      while (Date.now() < deadline) {
+        const changes = deleteOldEventsBatch.run(d.id, eventsCutoff, batchSize).changes;
+        eventsDeleted += changes;
+        if (changes === 0) break;
+      }
+    }
 
     results.push({ drop_id: d.id, traces_deleted: tracesDeleted, events_deleted: eventsDeleted });
+
+    // Respect the time budget across drops.
+    if (Date.now() >= deadline) break;
   }
 
   return results;

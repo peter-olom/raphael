@@ -5,6 +5,7 @@ import { betterAuth } from 'better-auth';
 import { fromNodeHeaders } from 'better-auth/node';
 import { genericOAuth } from 'better-auth/plugins';
 import {
+  applySqlitePragmas,
   DB_PATH,
   countUserProfiles,
   getAppSetting,
@@ -56,7 +57,7 @@ export function authEnabled() {
 const emailPasswordEnabled = isTruthy(process.env.RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED);
 
 const authDb = new Database(DB_PATH);
-authDb.pragma('journal_mode = WAL');
+applySqlitePragmas(authDb);
 
 type GenericOAuthConfig = {
   providerId: string;

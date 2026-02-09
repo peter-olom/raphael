@@ -1,9 +1,38 @@
 import { Router, Request, Response } from 'express';
-import { insertTraceRow, resolveDropId } from '../db/sqlite.js';
-import { broadcast } from '../websocket.js';
+import { insertTraceRows, resolveDropId, type TraceInsertRow } from '../db/sqlite.js';
+import { broadcast, hasSubscribers } from '../websocket.js';
 import { authEnabled, noteApiKeyUsageDrop, requireAuth, requireDropAccess } from '../auth.js';
 
 export const otlpRouter = Router();
+
+function parsePositiveInt(raw: unknown, fallback: number) {
+  const n = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
+}
+
+function makeRingBuffer<T>(max: number) {
+  const buf: T[] = [];
+  let start = 0;
+  return {
+    push(item: T) {
+      if (max <= 0) return;
+      if (buf.length < max) buf.push(item);
+      else {
+        buf[start] = item;
+        start = (start + 1) % max;
+      }
+    },
+    toArray() {
+      if (buf.length === 0) return [];
+      if (buf.length < max) return buf.slice();
+      return buf.slice(start).concat(buf.slice(0, start));
+    },
+    size() {
+      return buf.length;
+    },
+  };
+}
 
 interface OtlpSpan {
   traceId: string;
@@ -53,7 +82,14 @@ otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
       return;
     }
 
-    const insertedTraces: unknown[] = [];
+    const rows: TraceInsertRow[] = [];
+
+    const shouldBroadcast = hasSubscribers(dropId);
+    const maxBroadcast = parsePositiveInt(process.env.RAPHAEL_INGEST_BROADCAST_MAX_ITEMS, 500);
+    const batchSize = parsePositiveInt(process.env.RAPHAEL_INGEST_BROADCAST_BATCH_SIZE, 200);
+    const broadcastBuf = shouldBroadcast ? makeRingBuffer<any>(maxBroadcast) : null;
+
+    const createdAt = Date.now();
 
     for (const resourceSpan of body.resourceSpans) {
       const serviceName = extractServiceName(resourceSpan.resource);
@@ -69,23 +105,8 @@ otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
           const durationMs = endTime ? endTime - startTime : null;
           const status = span.status?.code === 2 ? 'error' : 'ok';
           const attributes = JSON.stringify(flattenAttributes(span.attributes || []));
-          const createdAt = Date.now();
 
-          insertTraceRow(
-            dropId,
-            traceId,
-            spanId,
-            parentSpanId,
-            serviceName,
-            operationName,
-            startTime,
-            endTime,
-            durationMs,
-            status,
-            attributes
-          );
-
-          const trace = {
+          rows.push({
             drop_id: dropId,
             trace_id: traceId,
             span_id: spanId,
@@ -97,17 +118,38 @@ otlpRouter.post('/v1/traces', (req: Request, res: Response) => {
             duration_ms: durationMs,
             status,
             attributes,
-            created_at: createdAt,
-          };
+          });
 
-          insertedTraces.push(trace);
+          if (broadcastBuf) {
+            broadcastBuf.push({
+              drop_id: dropId,
+              trace_id: traceId,
+              span_id: spanId,
+              parent_span_id: parentSpanId,
+              service_name: serviceName,
+              operation_name: operationName,
+              start_time: startTime,
+              end_time: endTime,
+              duration_ms: durationMs,
+              status,
+              attributes,
+              created_at: createdAt,
+            });
+          }
         }
       }
     }
 
-    // Broadcast to connected clients
-    if (insertedTraces.length > 0) {
-      broadcast({ type: 'traces', drop_id: dropId, data: insertedTraces }, dropId);
+    if (rows.length > 0) {
+      insertTraceRows(rows);
+    }
+
+    // Broadcast to connected clients (capped + batched).
+    if (broadcastBuf && broadcastBuf.size() > 0) {
+      const data = broadcastBuf.toArray();
+      for (let i = 0; i < data.length; i += batchSize) {
+        broadcast({ type: 'traces', drop_id: dropId, data: data.slice(i, i + batchSize) }, dropId);
+      }
     }
 
     res.status(200).json({ partialSuccess: {} });
