@@ -24,6 +24,14 @@ Data persists in a named volume mounted at `/data` inside the container.
 
 If you are upgrading from an older Raphael version that wrote the DB under `/app/data`, the volume may be root-owned. The included `raphael-init` service fixes volume permissions at startup so the main container can stay non-root.
 
+## Container Image (GHCR)
+
+If you are using the public GitHub repo, CI publishes a multi-arch image to GHCR:
+- `ghcr.io/<owner>/<repo>:latest` (default branch)
+- `ghcr.io/<owner>/<repo>:<sha>` and branch/tag variants
+
+If the package ends up private by default, set it to public in GitHub Packages settings for the repo/package.
+
 ## Required Environment
 
 At minimum:
