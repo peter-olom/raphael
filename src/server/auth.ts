@@ -134,6 +134,20 @@ const sessionExpiresIn =
     : undefined;
 
 const baseURL = process.env.BETTER_AUTH_BASE_URL || process.env.BETTER_AUTH_URL;
+const secretRaw = (process.env.BETTER_AUTH_SECRET || '').trim();
+
+function resolveBetterAuthSecret() {
+  if (secretRaw) return secretRaw;
+  if (!authEnabled()) return '';
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    // Fail fast with a clear message instead of letting BetterAuth throw later.
+    throw new Error('BETTER_AUTH_SECRET is required when RAPHAEL_AUTH_ENABLED=true (production)');
+  }
+  // Dev-only: ephemeral secret to avoid blocking local use.
+  const devSecret = `raphael_dev_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+  console.warn('BETTER_AUTH_SECRET is not set; using an ephemeral dev secret (sessions will reset on restart).');
+  return devSecret;
+}
 
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
@@ -201,47 +215,66 @@ function isOauthEmailAllowed(emailRaw: string) {
   return false;
 }
 
-export const auth: ReturnType<typeof betterAuth> = betterAuth({
-  appName: 'Raphael',
-  database: authDb,
-  ...(baseURL ? { baseURL } : {}),
-  trustedOrigins,
-  emailAndPassword: {
-    enabled: emailPasswordEnabled,
-  },
-  socialProviders,
-  account: {
-    accountLinking: {
-      enabled: true,
-      allowDifferentEmails: false,
+let authInstance: ReturnType<typeof betterAuth> | null = null;
+
+export function getAuth() {
+  if (!authEnabled()) {
+    throw new Error('Auth is disabled');
+  }
+  if (authInstance) return authInstance;
+
+  const secret = resolveBetterAuthSecret();
+
+  authInstance = betterAuth({
+    appName: 'Raphael',
+    secret,
+    database: authDb,
+    ...(baseURL ? { baseURL } : {}),
+    trustedOrigins,
+    emailAndPassword: {
+      enabled: emailPasswordEnabled,
     },
-  },
-  databaseHooks: {
-    user: {
-      create: {
-        before: async (user) => {
-          if (!oauthOnlyMode()) return;
-          const email = (user as any)?.email?.toString?.() ?? '';
-          if (!isOauthEmailAllowed(email)) return false;
+    socialProviders,
+    account: {
+      accountLinking: {
+        enabled: true,
+        allowDifferentEmails: false,
+      },
+    },
+    databaseHooks: {
+      user: {
+        create: {
+          before: async (user) => {
+            if (!oauthOnlyMode()) return;
+            const email = (user as any)?.email?.toString?.() ?? '';
+            if (!isOauthEmailAllowed(email)) return false;
+          },
+        },
+      },
+      session: {
+        create: {
+          before: async (session) => {
+            if (!oauthOnlyMode()) return;
+            const userId = (session as any)?.userId?.toString?.() ?? '';
+            if (!userId) return false;
+            const row = authDb.prepare(`SELECT email FROM user WHERE id = ?`).get(userId) as { email?: string } | undefined;
+            const email = row?.email?.toString?.() ?? '';
+            if (!isOauthEmailAllowed(email)) return false;
+          },
         },
       },
     },
-    session: {
-      create: {
-        before: async (session) => {
-          if (!oauthOnlyMode()) return;
-          const userId = (session as any)?.userId?.toString?.() ?? '';
-          if (!userId) return false;
-          const row = authDb.prepare(`SELECT email FROM user WHERE id = ?`).get(userId) as { email?: string } | undefined;
-          const email = row?.email?.toString?.() ?? '';
-          if (!isOauthEmailAllowed(email)) return false;
-        },
-      },
-    },
-  },
-  plugins,
-  ...(sessionExpiresIn ? { session: { expiresIn: sessionExpiresIn } } : {}),
-});
+    plugins,
+    ...(sessionExpiresIn ? { session: { expiresIn: sessionExpiresIn } } : {}),
+  });
+
+  return authInstance;
+}
+
+// Used by the Express routing layer. Kept separate so index.ts doesn't need to know about lazy init.
+export function getAuthNodeHandler() {
+  return getAuth();
+}
 
 const providerList = [...Object.keys(socialProviders), ...genericProviders.map((p) => p.providerId)];
 
@@ -349,7 +382,7 @@ export async function ensureAdminSeed() {
   const row = authDb.prepare(`SELECT id FROM user WHERE email = ?`).get(normalized) as { id: string } | undefined;
   if (!row) {
     try {
-      await auth.api.signUpEmail({
+      await getAuth().api.signUpEmail({
         body: {
           email: normalized,
           password: adminPassword,
@@ -363,7 +396,7 @@ export async function ensureAdminSeed() {
   }
 
   try {
-    const ctx = (await auth.$context) as any;
+    const ctx = (await getAuth().$context) as any;
     if (!ctx?.password || !ctx?.internalAdapter?.updatePassword) return;
     const userId = row?.id ?? (authDb.prepare(`SELECT id FROM user WHERE email = ?`).get(normalized) as { id: string } | undefined)?.id;
     if (!userId) return;
@@ -386,7 +419,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   try {
-    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+    const session = await getAuth().api.getSession({ headers: fromNodeHeaders(req.headers) });
     if (session?.user) {
       const profile = await ensureUserProfile({ id: session.user.id, email: session.user.email });
       if (profile?.disabled) {

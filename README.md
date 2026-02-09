@@ -132,6 +132,10 @@ curl -X POST http://localhost:6274/v1/events \
 | `RAPHAEL_PRUNE_BATCH_SIZE` | `5000` | Retention delete batch size (chunked deletes) |
 | `RAPHAEL_PRUNE_MAX_RUNTIME_MS` | `250` | Time budget per pruning run (avoids long write locks) |
 
+## Hosting Raphael
+
+See `docs/hosting.md` for a simple Docker hosting setup (non-root, read-only rootfs, auth/TLS guidance).
+
 ## Tech Stack
 
 - **Backend**: Node.js, Express, better-sqlite3, WebSocket

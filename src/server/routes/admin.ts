@@ -12,7 +12,7 @@ import {
   setAppSetting,
   createUserProfileIfMissing,
 } from '../db/sqlite.js';
-import { auth, authEnabled, requireAdmin, requireAuth } from '../auth.js';
+import { authEnabled, getAuth, requireAdmin, requireAuth } from '../auth.js';
 
 export const adminRouter = Router();
 
@@ -119,7 +119,7 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
 
     // Use the supported BetterAuth API for creating email/password users.
     // (auth.$context is a Promise and internalAdapter is not guaranteed to be stable across versions.)
-    const created = await auth.api.signUpEmail({
+    const created = await getAuth().api.signUpEmail({
       body: {
         email,
         password,

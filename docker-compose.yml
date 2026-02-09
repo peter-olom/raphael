@@ -1,17 +1,58 @@
 services:
+  raphael-init:
+    image: busybox:1.36.1
+    container_name: raphael-init
+    command: ["sh", "-c", "mkdir -p /data && chown -R 65532:65532 /data && chmod 700 /data"]
+    volumes:
+      - raphael-data:/data
+    restart: "no"
+
   raphael:
     build: .
     container_name: raphael
+    depends_on:
+      raphael-init:
+        condition: service_completed_successfully
     ports:
       - "6274:6274"
     volumes:
-      - raphael-data:/app/data
+      - raphael-data:/data
     environment:
       - PORT=6274
-      - RAPHAEL_DB_PATH=/app/data/raphael.db
+      - RAPHAEL_DB_PATH=/data/raphael.db
+      - NODE_ENV=production
+      - RAPHAEL_AUTH_ENABLED=${RAPHAEL_AUTH_ENABLED:-false}
+      - RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED=${RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED:-false}
+      - RAPHAEL_ADMIN_EMAIL=${RAPHAEL_ADMIN_EMAIL:-}
+      - RAPHAEL_ADMIN_PASSWORD=${RAPHAEL_ADMIN_PASSWORD:-}
+      - RAPHAEL_AUTH_SESSION_TTL_HOURS=${RAPHAEL_AUTH_SESSION_TTL_HOURS:-}
+      - RAPHAEL_AUTH_TRUSTED_ORIGINS=${RAPHAEL_AUTH_TRUSTED_ORIGINS:-}
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-}
+      - BETTER_AUTH_BASE_URL=${BETTER_AUTH_BASE_URL:-}
+      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-}
+      - RAPHAEL_AUTH_GOOGLE_CLIENT_ID=${RAPHAEL_AUTH_GOOGLE_CLIENT_ID:-}
+      - RAPHAEL_AUTH_GOOGLE_CLIENT_SECRET=${RAPHAEL_AUTH_GOOGLE_CLIENT_SECRET:-}
+      - RAPHAEL_AUTH_GITHUB_CLIENT_ID=${RAPHAEL_AUTH_GITHUB_CLIENT_ID:-}
+      - RAPHAEL_AUTH_GITHUB_CLIENT_SECRET=${RAPHAEL_AUTH_GITHUB_CLIENT_SECRET:-}
+      - RAPHAEL_AUTH_AZURE_TENANT_ID=${RAPHAEL_AUTH_AZURE_TENANT_ID:-}
+      - RAPHAEL_AUTH_AZURE_CLIENT_ID=${RAPHAEL_AUTH_AZURE_CLIENT_ID:-}
+      - RAPHAEL_AUTH_AZURE_CLIENT_SECRET=${RAPHAEL_AUTH_AZURE_CLIENT_SECRET:-}
+      - RAPHAEL_AUTH_GENERIC_OAUTH=${RAPHAEL_AUTH_GENERIC_OAUTH:-}
     restart: unless-stopped
+    init: true
+
+    # Hardening
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6274/api/stats"]
+      # Use Node (present in distroless) to avoid curl/wget in the runtime image.
+      test: ["CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:6274/api/auth/config').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 3

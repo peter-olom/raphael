@@ -1,0 +1,17 @@
+data/
+dist/
+node_modules/
+.git/
+.github/
+.claude/
+
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+tmp/
+.env
+.env.*
+

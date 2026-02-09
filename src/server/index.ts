@@ -10,7 +10,7 @@ import { apiRouter } from './routes/api.js';
 import { queryRouter } from './routes/query.js';
 import { setupWebSocket } from './websocket.js';
 import { pruneByRetention } from './db/sqlite.js';
-import { auth, authMiddleware, ensureAdminSeed, getAuthConfigSummary } from './auth.js';
+import { authEnabled, authMiddleware, ensureAdminSeed, getAuthConfigSummary, getAuthNodeHandler } from './auth.js';
 import { toNodeHandler } from 'better-auth/node';
 import { adminRouter } from './routes/admin.js';
 import { accountRouter } from './routes/account.js';
@@ -29,7 +29,9 @@ app.get('/api/auth/config', (_req, res) => {
 });
 
 // BetterAuth handler (must come before express.json)
-app.all('/api/auth/*', toNodeHandler(auth));
+if (authEnabled()) {
+  app.all('/api/auth/*', toNodeHandler(getAuthNodeHandler()));
+}
 
 app.use(express.json({ limit: '10mb' }));
 app.use(authMiddleware);

@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
 import { DEFAULT_DROP_ID, getUserDropPermission, resolveDropId } from './db/sqlite.js';
-import { auth, authEnabled, ensureUserProfile } from './auth.js';
+import { authEnabled, ensureUserProfile, getAuth } from './auth.js';
 import { fromNodeHeaders } from 'better-auth/node';
 
 let wss: WebSocketServer;
@@ -29,7 +29,7 @@ export function setupWebSocket(server: Server) {
   wss.on('connection', async (ws, req) => {
     if (authEnabled()) {
       try {
-        const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+        const session = await getAuth().api.getSession({ headers: fromNodeHeaders(req.headers) });
         if (!session?.user) {
           ws.close(4401, 'Unauthorized');
           return;
