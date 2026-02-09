@@ -46,12 +46,13 @@ const DEFAULT_TRACES_RETENTION_MS = 3 * 24 * 60 * 60 * 1000; // 3d
 const DEFAULT_EVENTS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7d
 
 // Create tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS drops (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    created_at INTEGER DEFAULT (unixepoch() * 1000)
-  );
+	db.exec(`
+	  CREATE TABLE IF NOT EXISTS drops (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+	    label TEXT,
+	    created_at INTEGER DEFAULT (unixepoch() * 1000)
+	  );
 
   CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -231,8 +232,17 @@ function columnExists(table: string, column: string): boolean {
   return rows.length > 0;
 }
 
+// Lightweight migrations for older DBs.
+const addedDropsLabel = !columnExists('drops', 'label');
+if (addedDropsLabel) {
+  db.exec(`ALTER TABLE drops ADD COLUMN label TEXT;`);
+  // One-time backfill so older DBs don't suddenly show "default" in the UI.
+  db.prepare(`UPDATE drops SET label = ? WHERE name = ? AND label IS NULL`).run('Default', 'default');
+}
+
 function ensureDefaultDrop(): number {
-  db.prepare(`INSERT OR IGNORE INTO drops (name) VALUES (?)`).run('default');
+  // Default drop identity is stable ('default'); label is user-facing.
+  db.prepare(`INSERT OR IGNORE INTO drops (name, label) VALUES (?, ?)`).run('default', 'Default');
   const row = db.prepare(`SELECT id FROM drops WHERE name = ?`).get('default') as { id: number };
   return row.id;
 }
@@ -620,7 +630,7 @@ export function listDrops() {
   const drops = db
     .prepare(
       `
-        SELECT d.id, d.name, d.created_at,
+        SELECT d.id, d.name, d.label, d.created_at,
                r.traces_retention_ms, r.events_retention_ms, r.updated_at
         FROM drops d
         LEFT JOIN drop_retention r ON r.drop_id = d.id
@@ -630,6 +640,7 @@ export function listDrops() {
     .all() as Array<{
     id: number;
     name: string;
+    label: string | null;
     created_at: number;
     traces_retention_ms: number | null;
     events_retention_ms: number | null;
@@ -644,7 +655,7 @@ export function listDrops() {
   return db
     .prepare(
       `
-        SELECT d.id, d.name, d.created_at,
+        SELECT d.id, d.name, d.label, d.created_at,
                r.traces_retention_ms, r.events_retention_ms, r.updated_at
         FROM drops d
         LEFT JOIN drop_retention r ON r.drop_id = d.id
@@ -654,6 +665,7 @@ export function listDrops() {
     .all() as Array<{
     id: number;
     name: string;
+    label: string | null;
     created_at: number;
     traces_retention_ms: number | null;
     events_retention_ms: number | null;
@@ -672,7 +684,7 @@ export function createDrop(name: string) {
   return db
     .prepare(
       `
-        SELECT d.id, d.name, d.created_at,
+        SELECT d.id, d.name, d.label, d.created_at,
                r.traces_retention_ms, r.events_retention_ms, r.updated_at
         FROM drops d
         LEFT JOIN drop_retention r ON r.drop_id = d.id
@@ -684,14 +696,74 @@ export function createDrop(name: string) {
 
 export function getDropById(dropId: number) {
   return db.prepare(`SELECT * FROM drops WHERE id = ?`).get(dropId) as
-    | { id: number; name: string; created_at: number }
+    | { id: number; name: string; label: string | null; created_at: number }
     | undefined;
 }
 
 export function getDropByName(name: string) {
   return db.prepare(`SELECT * FROM drops WHERE name = ?`).get(name.trim()) as
-    | { id: number; name: string; created_at: number }
+    | { id: number; name: string; label: string | null; created_at: number }
     | undefined;
+}
+
+export function setDropLabel(dropId: number, label: string | null) {
+  if (!Number.isFinite(dropId) || dropId <= 0) throw new Error('Invalid drop id');
+  if (!getDropById(dropId)) throw new Error('Drop not found');
+  const normalized = (label ?? '').trim();
+  const nextLabel = normalized ? normalized : null;
+  if (nextLabel && nextLabel.length > 128) throw new Error('Drop label too long (max 128 chars)');
+
+  ensureRetentionRow(dropId);
+  db.prepare(`UPDATE drops SET label = ? WHERE id = ?`).run(nextLabel, dropId);
+  return db
+    .prepare(
+      `
+        SELECT d.id, d.name, d.label, d.created_at,
+               r.traces_retention_ms, r.events_retention_ms, r.updated_at
+        FROM drops d
+        LEFT JOIN drop_retention r ON r.drop_id = d.id
+        WHERE d.id = ?
+      `
+    )
+    .get(dropId) as
+    | {
+        id: number;
+        name: string;
+        label: string | null;
+        created_at: number;
+        traces_retention_ms: number | null;
+        events_retention_ms: number | null;
+        updated_at: number | null;
+      }
+	    | undefined;
+}
+
+function countDrops(): number {
+  const row = db.prepare(`SELECT COUNT(*) as count FROM drops`).get() as { count: number };
+  return Number(row?.count ?? 0);
+}
+
+export function deleteDrop(dropId: number) {
+  if (!Number.isFinite(dropId) || dropId <= 0) throw new Error('Invalid drop id');
+  if (dropId === DEFAULT_DROP_ID) throw new Error('Cannot delete the default drop');
+  if (!getDropById(dropId)) throw new Error('Drop not found');
+  if (countDrops() <= 1) throw new Error('Cannot delete the last drop');
+
+  // Do explicit deletes so this works even if SQLite foreign_keys is disabled,
+  // and because some tables (traces/wide_events) do not have FK constraints.
+  const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM traces WHERE drop_id = ?`).run(dropId);
+    db.prepare(`DELETE FROM wide_events WHERE drop_id = ?`).run(dropId);
+    db.prepare(`DELETE FROM dashboards WHERE drop_id = ?`).run(dropId);
+    db.prepare(`DELETE FROM drop_retention WHERE drop_id = ?`).run(dropId);
+    db.prepare(`DELETE FROM user_drop_permissions WHERE drop_id = ?`).run(dropId);
+    db.prepare(`DELETE FROM api_key_permissions WHERE drop_id = ?`).run(dropId);
+    db.prepare(`UPDATE api_key_usage SET drop_id = NULL WHERE drop_id = ?`).run(dropId);
+    db.prepare(`DELETE FROM drops WHERE id = ?`).run(dropId);
+  });
+
+  tx();
+  return { success: true };
 }
 
 export function ensureDrop(nameOrId?: string | null): number {
@@ -1070,7 +1142,7 @@ export function listDropsForOwnerAccess(ownerUserId: string) {
   return db
     .prepare(
       `
-        SELECT d.id, d.name, d.created_at,
+        SELECT d.id, d.name, d.label, d.created_at,
                p.can_ingest, p.can_query
         FROM user_drop_permissions p
         INNER JOIN drops d ON d.id = p.drop_id
@@ -1082,6 +1154,7 @@ export function listDropsForOwnerAccess(ownerUserId: string) {
     .all(ownerUserId) as Array<{
     id: number;
     name: string;
+    label: string | null;
     created_at: number;
     can_ingest: number;
     can_query: number;

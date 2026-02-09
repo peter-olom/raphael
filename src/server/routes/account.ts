@@ -47,7 +47,14 @@ accountRouter.get('/drops', (req: Request, res: Response) => {
   if (!requireSession(req, res)) return;
   const user = req.auth!.user!;
   if (user.role === 'admin') {
-    const drops = listDrops().map((d) => ({ id: d.id, name: d.name, created_at: d.created_at, can_ingest: 1, can_query: 1 }));
+    const drops = listDrops().map((d) => ({
+      id: d.id,
+      name: d.name,
+      label: d.label ?? null,
+      created_at: d.created_at,
+      can_ingest: 1,
+      can_query: 1,
+    }));
     res.json({ drops });
     return;
   }

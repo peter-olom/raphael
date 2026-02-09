@@ -45,6 +45,7 @@ interface Stats {
 interface Drop {
   id: number;
   name: string;
+  label: string | null;
   created_at: number;
   traces_retention_ms: number | null;
   events_retention_ms: number | null;
@@ -1756,19 +1757,27 @@ export default function App() {
   const [generatedApiKey, setGeneratedApiKey] = useState<string | null>(null);
   const [generatedApiKeyMeta, setGeneratedApiKeyMeta] = useState<string | null>(null);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
-  const [accountDrops, setAccountDrops] = useState<Array<{ id: number; name: string; can_ingest: number; can_query: number }>>([]);
+  const [accountDrops, setAccountDrops] = useState<
+    Array<{ id: number; name: string; label: string | null; can_ingest: number; can_query: number }>
+  >([]);
   const [accountDropsLoaded, setAccountDropsLoaded] = useState(false);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [events, setEvents] = useState<WideEvent[]>([]);
   const [stats, setStats] = useState<Stats>({ traces: 0, wideEvents: 0, errors: 0 });
   const [search, setSearch] = useState('');
   const [drops, setDrops] = useState<Drop[]>([]);
+  const [defaultDropId, setDefaultDropId] = useState<number | null>(null);
   const [dropId, setDropId] = useState<number | null>(null);
   const dropIdRef = useRef<number | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [eventFilters, setEventFilters] = useState<FilterState>({});
   const [traceFilters, setTraceFilters] = useState<FilterState>({});
   const [newDropName, setNewDropName] = useState('');
+  const [dropLabelDraft, setDropLabelDraft] = useState('');
+  const [dropLabelSaving, setDropLabelSaving] = useState(false);
+  const [showDeleteDrop, setShowDeleteDrop] = useState(false);
+  const [deleteDropConfirm, setDeleteDropConfirm] = useState('');
+  const [deleteDropDeleting, setDeleteDropDeleting] = useState(false);
   const [retentionTracesDays, setRetentionTracesDays] = useState<string>('3');
   const [retentionEventsDays, setRetentionEventsDays] = useState<string>('7');
   const [selected, setSelected] = useState<Selected | null>(null);
@@ -1807,14 +1816,24 @@ export default function App() {
     !accountDrops.some((d) => Boolean(d.can_query));
   const authClient = useMemo(() => createAuthClient({ baseURL: window.location.origin }), []);
 
+  const formatDropDisplay = useCallback((drop?: { name: string; label?: string | null } | null) => {
+    if (!drop) return '';
+    const label = (drop.label ?? '').trim();
+    return label ? label : drop.name;
+  }, []);
+
   const dropLabel = useCallback(
     (id: number) => {
-      const fromAll = drops.find((d) => d.id === id)?.name;
-      const fromAccount = accountDrops.find((d) => d.id === id)?.name;
-      const name = fromAll || fromAccount;
-      return name ? `${name} (#${id})` : `Drop #${id}`;
+      const fromAll = drops.find((d) => d.id === id);
+      const fromAccount = accountDrops.find((d) => d.id === id);
+      const drop = fromAll || fromAccount;
+      if (!drop) return `Drop #${id}`;
+      const display = formatDropDisplay(drop);
+      const identity = drop.name;
+      const suffix = display !== identity ? ` (${identity})` : '';
+      return `${display}${suffix} (#${id})`;
     },
-    [drops, accountDrops]
+    [drops, accountDrops, formatDropDisplay]
   );
 
   useEffect(() => {
@@ -1955,6 +1974,7 @@ export default function App() {
       const res = await fetch('/api/drops');
       const json = (await res.json()) as { default_drop_id: number; drops: Drop[] };
       setDrops(json.drops);
+      setDefaultDropId(json.default_drop_id);
 
       const urlDropRaw = new URLSearchParams(window.location.search).get('drop');
       const urlDropId = urlDropRaw && /^\d+$/.test(urlDropRaw) ? Number.parseInt(urlDropRaw, 10) : null;
@@ -2028,7 +2048,9 @@ export default function App() {
       setAccountDropsLoaded(false);
       const res = await fetch('/api/account/drops');
       if (!res.ok) throw new Error('Failed to load drops');
-      const json = (await res.json()) as { drops: Array<{ id: number; name: string; can_ingest: number; can_query: number }> };
+      const json = (await res.json()) as {
+        drops: Array<{ id: number; name: string; label: string | null; can_ingest: number; can_query: number }>;
+      };
       setAccountDrops(json.drops ?? []);
     } catch (error) {
       console.error('Failed to fetch account drops:', error);
@@ -2486,6 +2508,9 @@ export default function App() {
 
     const current = drops.find((d) => d.id === dropId);
     if (current) {
+      setDropLabelDraft(current.label ?? '');
+      setShowDeleteDrop(false);
+      setDeleteDropConfirm('');
       setRetentionTracesDays(
         current.traces_retention_ms ? String(Math.round(current.traces_retention_ms / (24 * 60 * 60 * 1000))) : '0'
       );
@@ -2811,6 +2836,67 @@ export default function App() {
       fetchData();
     } catch (error) {
       alert((error as Error).message);
+    }
+  };
+
+  const handleSaveDropLabel = async () => {
+    if (dropIdRef.current === null) return;
+    setDropLabelSaving(true);
+    try {
+      const res = await fetch(`/api/drops/${dropIdRef.current}/label`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: dropLabelDraft.trim() ? dropLabelDraft.trim() : null }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to save drop label');
+      }
+      await fetchDrops();
+      flashToast('Saved drop label');
+    } catch (error) {
+      alert((error as Error).message);
+    } finally {
+      setDropLabelSaving(false);
+    }
+  };
+
+  const handleDeleteDrop = async () => {
+    if (dropIdRef.current === null) return;
+    if (defaultDropId !== null && dropIdRef.current === defaultDropId) {
+      return alert('Cannot delete the default drop.');
+    }
+    if (drops.length <= 1) {
+      return alert('Cannot delete the last remaining drop.');
+    }
+    const current = drops.find((d) => d.id === dropIdRef.current) ?? null;
+    if (!current) return;
+
+    const typed = deleteDropConfirm.trim();
+    if (typed !== current.name) {
+      return alert(`Type the drop ID exactly to confirm: ${current.name}`);
+    }
+
+    const ok = confirm(
+      `Permanently delete drop "${formatDropDisplay(current)}" (ID: ${current.name})?\n\nThis will delete all traces, wide events, dashboards, and permissions for this drop.`
+    );
+    if (!ok) return;
+
+    setDeleteDropDeleting(true);
+    try {
+      const res = await fetch(`/api/drops/${dropIdRef.current}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to delete drop');
+      }
+      setShowDeleteDrop(false);
+      setDeleteDropConfirm('');
+      await fetchDrops();
+      flashToast('Deleted drop');
+    } catch (error) {
+      alert((error as Error).message);
+    } finally {
+      setDeleteDropDeleting(false);
     }
   };
 
@@ -3271,7 +3357,7 @@ export default function App() {
 
           <div style={{ padding: '16px 18px 18px' }}>
             {authProviders.length > 0 && (
-              <div style={{ display: 'grid', gap: '10px' }}>
+		                              <div style={{ display: 'grid', gap: '10px' }}>
                 {authProviders.map((provider) => (
                   <button
                     key={provider.id}
@@ -3458,7 +3544,8 @@ export default function App() {
             <span style={{ color: '#fff' }}>
               {dataLocked
                 ? 'No query access'
-                : drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? 'loading…' : `#${dropId}`)}
+                : formatDropDisplay(drops.find((d) => d.id === dropId) ?? null) ||
+                  (dropId === null ? 'loading…' : `#${dropId}`)}
             </span>
           </button>
         </div>
@@ -4433,8 +4520,8 @@ export default function App() {
                 </div>
               )}
 
-              {settingsTab === 'drops' && (
-                <div style={{ display: 'grid', gap: '16px' }}>
+	              {settingsTab === 'drops' && (
+	                <div style={{ display: 'grid', gap: '16px' }}>
                   {authActive && !isAdmin && (
                     <div style={styles.pane}>
                       <div style={styles.paneHeader}>
@@ -4444,6 +4531,9 @@ export default function App() {
                       <div style={styles.paneBody}>
                         <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
                           Drops are managed by admins. You can still query and ingest into drops you have access to.
+                        </div>
+                        <div style={{ ...styles.tiny, marginTop: '10px', color: 'rgba(255,255,255,0.65)', lineHeight: 1.6 }}>
+                          Admin-only controls like <span style={styles.mono}>Create drop</span>, <span style={styles.mono}>Drop label</span>, and retention settings are hidden for non-admins.
                         </div>
                       </div>
                     </div>
@@ -4459,60 +4549,207 @@ export default function App() {
                         This selection controls what you view in <span style={styles.mono}>Wide Events</span>, <span style={styles.mono}>Traces</span>, and <span style={styles.mono}>Dashboards</span>.
                         Drop retention and routing settings apply to the active drop.
                       </div>
-                      <select
-                        style={{ ...styles.select, width: '100%' }}
-                        value={dropId ?? ''}
-                        onChange={(e) => setDropId(Number(e.target.value))}
-                        disabled={drops.length === 0}
-                        title="Active Drop"
-                      >
+	                      <select
+	                        style={{ ...styles.select, width: '100%' }}
+	                        value={dropId ?? ''}
+	                        onChange={(e) => setDropId(Number(e.target.value))}
+	                        disabled={drops.length === 0}
+	                        title="Active Drop"
+	                      >
                         {drops.map((d) => (
                           <option key={d.id} value={d.id}>
-                            {d.name}
+                            {(() => {
+                              const display = formatDropDisplay(d);
+                              const identity = d.name;
+                              return display !== identity ? `${display} (${identity})` : display;
+                            })()}
                           </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
+	                        ))}
+	                      </select>
+	                    </div>
+	                  </div>
+	
                   {(!authActive || isAdmin) && (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
                       <div style={styles.pane}>
                         <div style={styles.paneHeader}>
                           <span style={styles.paneTitle}>Drop Configuration</span>
                           <span style={styles.tiny}>
-                            Active: {drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? '-' : `#${dropId}`)}
+                            Active: {formatDropDisplay(drops.find((d) => d.id === dropId) ?? null) || (dropId === null ? '-' : `#${dropId}`)}
                           </span>
                         </div>
-                        <div style={styles.paneBody}>
-                          <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px' }}>
-                            Drops isolate telemetry streams (e.g., staging vs production).
-                          </div>
+	                        <div style={styles.paneBody}>
+	                          <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px' }}>
+	                            Drops isolate telemetry streams (e.g., staging vs production).
+	                          </div>
 
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'end' }}>
-                            <div>
-                              <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Create new drop</div>
-                              <input
-                                style={styles.filterInput}
-                                placeholder="Drop name (e.g., production)"
-                                value={newDropName}
-                                onChange={(e) => setNewDropName(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleCreateDrop()}
-                              />
-                            </div>
-                            <button style={styles.button} onClick={handleCreateDrop} disabled={!newDropName.trim()}>
-                              Create
-                            </button>
-                          </div>
+	                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', alignItems: 'start' }}>
+	                            <div style={styles.filterCard}>
+	                              <div style={styles.filterCardTitle}>
+	                                <span>Current Drop</span>
+	                                <span style={styles.filterHint}>
+	                                  ID:{' '}
+	                                  <span style={styles.mono}>
+	                                    {drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? '-' : `#${dropId}`)}
+	                                  </span>
+	                                </span>
+	                              </div>
+	                              <div style={{ display: 'grid', gap: '10px' }}>
+	                                <div
+	                                  style={{
+	                                    display: 'grid',
+	                                    gridTemplateColumns: '1fr 132px',
+	                                    gap: '10px',
+	                                    alignItems: 'end',
+	                                  }}
+	                                >
+	                                  <div>
+	                                    <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Display label</div>
+	                                    <input
+	                                      style={styles.filterInput}
+	                                      placeholder="Shown in the UI (optional)"
+	                                      value={dropLabelDraft}
+	                                      onChange={(e) => setDropLabelDraft(e.target.value)}
+	                                      onKeyDown={(e) => e.key === 'Enter' && handleSaveDropLabel()}
+	                                      disabled={dropId === null}
+	                                    />
+	                                  </div>
+	                                  <button
+	                                    style={{ ...styles.button, width: '100%' }}
+	                                    onClick={handleSaveDropLabel}
+	                                    disabled={dropId === null || dropLabelSaving}
+	                                  >
+	                                    {dropLabelSaving ? 'Saving…' : 'Save'}
+	                                  </button>
+	                                </div>
+	                                <div style={styles.tiny}>
+	                                  Labels are cosmetic. Routing still uses the drop ID above.
+	                                </div>
+		                                <div style={styles.tiny}>
+		                                  Send:{' '}
+		                                  <span style={styles.mono}>
+		                                    X-Raphael-Drop: {drops.find((d) => d.id === dropId)?.name ?? ''}
+		                                  </span>
+		                                </div>
 
-                          <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
-                            <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Ingest routing</div>
-                            <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.5 }}>
-                              Use header <span style={styles.mono}>X-Raphael-Drop</span> or query <span style={styles.mono}>?drop=</span>.
-                            </div>
-                          </div>
-                        </div>
-                      </div>
+		                                <div style={{ marginTop: '6px', paddingTop: '10px', borderTop: '1px solid #242424' }}>
+		                                  <div style={{ ...styles.metaLabel, marginBottom: '6px', color: '#fca5a5' }}>Danger zone</div>
+		                                  {(() => {
+		                                    const isDefault = dropId !== null && defaultDropId !== null && dropId === defaultDropId;
+		                                    const isLast = drops.length <= 1;
+		                                    const disabled = dropId === null || isDefault || isLast;
+		                                    const dropName = drops.find((d) => d.id === dropId)?.name ?? '';
+		
+		                                    return (
+		                                      <div style={{ display: 'grid', gap: '8px' }}>
+		                                        {isDefault && (
+		                                          <div style={styles.tiny}>
+		                                            The default drop cannot be deleted.
+		                                          </div>
+		                                        )}
+		                                        {isLast && (
+		                                          <div style={styles.tiny}>
+		                                            You can’t delete the last remaining drop.
+		                                          </div>
+		                                        )}
+		                                        <button
+		                                          type="button"
+		                                          style={{ ...styles.button, ...styles.buttonDanger, width: 'fit-content', opacity: disabled ? 0.6 : 1 }}
+		                                          onClick={() => !disabled && setShowDeleteDrop((v) => !v)}
+		                                          disabled={disabled}
+		                                          title={disabled ? (isDefault ? 'Default drop cannot be deleted' : isLast ? 'Cannot delete last drop' : '') : ''}
+		                                        >
+		                                          {showDeleteDrop ? 'Cancel delete' : 'Delete this drop…'}
+		                                        </button>
+		                                        {showDeleteDrop && !disabled && (
+		                                          <div style={{ display: 'grid', gap: '8px' }}>
+		                                            <div style={styles.tiny}>
+		                                              This deletes <b>all</b> traces, wide events, dashboards, and permissions in this drop.
+		                                            </div>
+		                                            <div style={styles.tiny}>
+		                                              Type the drop ID to confirm: <span style={styles.mono}>{dropName}</span>
+		                                            </div>
+		                                            <div
+		                                              style={{
+		                                                display: 'grid',
+		                                                gridTemplateColumns: '1fr 132px',
+		                                                gap: '10px',
+		                                                alignItems: 'end',
+		                                              }}
+		                                            >
+		                                              <input
+		                                                style={styles.filterInput}
+		                                                placeholder="Type drop ID exactly"
+		                                                value={deleteDropConfirm}
+		                                                onChange={(e) => setDeleteDropConfirm(e.target.value)}
+		                                                onKeyDown={(e) => e.key === 'Enter' && handleDeleteDrop()}
+		                                                disabled={deleteDropDeleting}
+		                                              />
+		                                              <button
+		                                                type="button"
+		                                                style={{ ...styles.button, ...styles.buttonDanger, width: '100%' }}
+		                                                onClick={handleDeleteDrop}
+		                                                disabled={deleteDropDeleting}
+		                                              >
+		                                                {deleteDropDeleting ? 'Deleting…' : 'Delete'}
+		                                              </button>
+		                                            </div>
+		                                          </div>
+		                                        )}
+		                                      </div>
+		                                    );
+		                                  })()}
+		                                </div>
+		                              </div>
+		                            </div>
+
+	                            <div style={styles.filterCard}>
+	                              <div style={styles.filterCardTitle}>
+	                                <span>Create New Drop</span>
+	                                <span style={styles.filterHint}>New telemetry stream</span>
+	                              </div>
+	                              <div style={{ display: 'grid', gap: '10px' }}>
+	                                <div
+	                                  style={{
+	                                    display: 'grid',
+	                                    gridTemplateColumns: '1fr 132px',
+	                                    gap: '10px',
+	                                    alignItems: 'end',
+	                                  }}
+	                                >
+	                                  <div>
+	                                    <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Drop ID (routing)</div>
+	                                    <input
+	                                      style={styles.filterInput}
+	                                      placeholder="e.g., prod"
+	                                      value={newDropName}
+	                                      onChange={(e) => setNewDropName(e.target.value)}
+	                                      onKeyDown={(e) => e.key === 'Enter' && handleCreateDrop()}
+	                                    />
+	                                  </div>
+	                                  <button
+	                                    style={{ ...styles.button, width: '100%' }}
+	                                    onClick={handleCreateDrop}
+	                                    disabled={!newDropName.trim()}
+	                                  >
+	                                    Create
+	                                  </button>
+	                                </div>
+	                                <div style={styles.tiny}>
+	                                  This ID is what you send in <span style={styles.mono}>X-Raphael-Drop</span> or <span style={styles.mono}>?drop=</span> (max 64 chars).
+	                                </div>
+	                              </div>
+	                            </div>
+	                          </div>
+
+	                          <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
+	                            <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Ingest routing</div>
+	                            <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.5 }}>
+	                              Use header <span style={styles.mono}>X-Raphael-Drop</span> or query <span style={styles.mono}>?drop=</span>.
+	                            </div>
+	                          </div>
+	                        </div>
+	                      </div>
 
                       <div style={styles.pane}>
                         <div style={styles.paneHeader}>
@@ -4672,7 +4909,11 @@ export default function App() {
                                   >
                                     {accountDrops.map((d) => (
                                       <option key={d.id} value={d.id}>
-                                        {d.name}
+                                        {(() => {
+                                          const display = formatDropDisplay(d);
+                                          const identity = d.name;
+                                          return display !== identity ? `${display} (${identity})` : display;
+                                        })()}
                                       </option>
                                     ))}
                                   </select>
@@ -5000,7 +5241,7 @@ export default function App() {
                                     borderRadius: '8px',
                                   }}
                                 >
-                                  <div style={{ color: '#fff' }}>{drop.name}</div>
+                                  <div style={{ color: '#fff' }}>{formatDropDisplay(drop)}</div>
                                   <div style={{ display: 'flex', gap: '12px' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
                                       <input
@@ -5149,7 +5390,7 @@ export default function App() {
                                             borderRadius: '8px',
                                           }}
                                         >
-                                          <div style={{ color: '#fff' }}>{drop.name}</div>
+                                          <div style={{ color: '#fff' }}>{formatDropDisplay(drop)}</div>
                                           <div style={{ display: 'flex', gap: '12px' }}>
                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
                                               <input
@@ -5659,7 +5900,7 @@ export default function App() {
                                 borderRadius: '8px',
                               }}
                             >
-                              <div style={{ color: '#fff' }}>{drop.name}</div>
+                              <div style={{ color: '#fff' }}>{formatDropDisplay(drop)}</div>
                               <div style={{ display: 'flex', gap: '12px' }}>
                                 <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
                                   <input

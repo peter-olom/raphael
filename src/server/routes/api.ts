@@ -23,6 +23,8 @@ import {
   listDrops,
   listUserDropPermissions,
   pruneByRetention,
+  deleteDrop,
+  setDropLabel,
   setDropRetentionMs,
   resolveDropId,
 } from '../db/sqlite.js';
@@ -204,6 +206,45 @@ apiRouter.put('/drops/:dropId/retention', (req: Request, res: Response) => {
   setDropRetentionMs(dropId, tracesRetentionMs, eventsRetentionMs);
   pruneByRetention(dropId);
   res.json({ success: true });
+});
+
+apiRouter.put('/drops/:dropId/label', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  const raw = (req.params as any).dropId as string | string[];
+  const dropId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
+  if (!Number.isFinite(dropId)) {
+    res.status(400).json({ error: 'Invalid drop id' });
+    return;
+  }
+  if (!getDropById(dropId)) {
+    res.status(404).json({ error: 'Drop not found' });
+    return;
+  }
+
+  try {
+    const rawLabel = req.body?.label;
+    const label = rawLabel === undefined || rawLabel === null ? null : String(rawLabel);
+    const updated = setDropLabel(dropId, label);
+    res.json(updated);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Failed to update drop label' });
+  }
+});
+
+apiRouter.delete('/drops/:dropId', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  const raw = (req.params as any).dropId as string | string[];
+  const dropId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
+  if (!Number.isFinite(dropId)) {
+    res.status(400).json({ error: 'Invalid drop id' });
+    return;
+  }
+  try {
+    deleteDrop(dropId);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Failed to delete drop' });
+  }
 });
 
 // Dashboards
