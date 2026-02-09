@@ -13,6 +13,16 @@ A lightweight, local trace and wide event viewer for debugging distributed syste
 - **SQLite Storage** - Persistent, lightweight, no external dependencies
 - **Search** - Query traces and events by service, operation, user, or attributes
 
+## Why Another Observability Tool?
+
+Most observability stacks optimize for production scale, configurability, and long-term analysis. When you are debugging locally (or iterating with an AI agent), that often turns into too many screens, too many knobs, and too much cognitive overhead.
+
+Raphael is intentionally straight to the point:
+
+- **Fast path to answers** - Get from "something is broken" to "here is the trace/event and why" quickly.
+- **Low cognitive load** - A small set of concepts that map to how debugging actually happens.
+- **Local-first UX** - Sensible defaults, minimal configuration, and a UI that stays out of your way.
+
 ## Screenshots
 
 ### Wide Events
@@ -21,7 +31,7 @@ A lightweight, local trace and wide event viewer for debugging distributed syste
 
 ### Trace Drilldown
 
-![Trace Detail](screenshots/trace-detail.png)
+![Trace Drilldown](screenshots/trace-detail.png)
 
 ### Wide Event Detail
 
