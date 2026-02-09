@@ -139,6 +139,12 @@ apiRouter.get('/drops', (_req: Request, res: Response) => {
     res.json({ default_drop_id: DEFAULT_DROP_ID, drops });
     return;
   }
+  if (_req.auth?.apiKey) {
+    const allowed = new Set((_req.auth.apiKeyPermissions ?? []).filter((p) => p.can_query).map((p) => p.drop_id));
+    const drops = listDrops().filter((d) => allowed.has(d.id));
+    res.json({ default_drop_id: DEFAULT_DROP_ID, drops });
+    return;
+  }
   res.status(403).json({ error: 'Drop access denied' });
 });
 

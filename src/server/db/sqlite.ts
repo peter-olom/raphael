@@ -155,10 +155,11 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS service_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name TEXT NOT NULL COLLATE NOCASE,
     created_by_user_id TEXT NOT NULL,
     created_at INTEGER DEFAULT (unixepoch() * 1000),
-    updated_at INTEGER DEFAULT (unixepoch() * 1000)
+    updated_at INTEGER DEFAULT (unixepoch() * 1000),
+    UNIQUE(created_by_user_id, name)
   );
 
   CREATE TABLE IF NOT EXISTS api_keys (
@@ -231,6 +232,85 @@ if (!columnExists('wide_events', 'drop_id')) {
   db.exec(`ALTER TABLE wide_events ADD COLUMN drop_id INTEGER NOT NULL DEFAULT ${DEFAULT_DROP_ID};`);
 }
 ensureRetentionRow(DEFAULT_DROP_ID);
+
+// Migrate service_accounts from global unique name -> per-user unique(name)
+try {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'service_accounts'`)
+    .get() as { sql?: string } | undefined;
+  const createSql = row?.sql ?? '';
+  const isLegacy = createSql.includes('name TEXT NOT NULL UNIQUE') && !createSql.includes('UNIQUE(created_by_user_id, name)');
+  if (isLegacy) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    // Avoid renaming the original table, because SQLite will rewrite foreign key references in other tables.
+    db.exec(`
+      CREATE TABLE service_accounts_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL COLLATE NOCASE,
+        created_by_user_id TEXT NOT NULL,
+        created_at INTEGER DEFAULT (unixepoch() * 1000),
+        updated_at INTEGER DEFAULT (unixepoch() * 1000),
+        UNIQUE(created_by_user_id, name)
+      );
+    `);
+    db.exec(`
+      INSERT INTO service_accounts_new (id, name, created_by_user_id, created_at, updated_at)
+      SELECT id, name, created_by_user_id, created_at, updated_at
+      FROM service_accounts;
+    `);
+    db.exec(`DROP TABLE service_accounts;`);
+    db.exec(`ALTER TABLE service_accounts_new RENAME TO service_accounts;`);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+} catch (error) {
+  // Keep startup resilient; legacy DBs may still have a globally-unique service_accounts.name.
+  console.warn('service_accounts migration failed:', error);
+}
+
+// Repair/migrate legacy api_keys tables that reference service_accounts_old (and/or old users table).
+// This can happen if service_accounts was renamed in older migrations: SQLite rewrites FK references.
+try {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'api_keys'`)
+    .get() as { sql?: string } | undefined;
+  const createSql = row?.sql ?? '';
+  const legacyFk = createSql.includes('service_accounts_old');
+  const legacyCreatedBy = createSql.includes('created_by_user_id INTEGER') || createSql.includes('REFERENCES users');
+  if (legacyFk || legacyCreatedBy) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      CREATE TABLE api_keys_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_account_id INTEGER NOT NULL,
+        name TEXT,
+        key_prefix TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        created_by_user_id TEXT NOT NULL,
+        created_at INTEGER DEFAULT (unixepoch() * 1000),
+        revoked_at INTEGER,
+        FOREIGN KEY (service_account_id) REFERENCES service_accounts(id) ON DELETE CASCADE
+      );
+    `);
+    db.exec(`
+      INSERT INTO api_keys_new (id, service_account_id, name, key_prefix, key_hash, created_by_user_id, created_at, revoked_at)
+      SELECT k.id,
+             k.service_account_id,
+             k.name,
+             k.key_prefix,
+             k.key_hash,
+             COALESCE(sa.created_by_user_id, CAST(k.created_by_user_id AS TEXT)) as created_by_user_id,
+             k.created_at,
+             k.revoked_at
+      FROM api_keys k
+      LEFT JOIN service_accounts sa ON sa.id = k.service_account_id;
+    `);
+    db.exec(`DROP TABLE api_keys;`);
+    db.exec(`ALTER TABLE api_keys_new RENAME TO api_keys;`);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+} catch (error) {
+  console.warn('api_keys migration failed:', error);
+}
 
 // Indexes that depend on drop_id (must run after migrations)
 db.exec(`
@@ -773,6 +853,19 @@ export function upsertUserProfile(params: {
   return getUserProfile(params.user_id);
 }
 
+export function createUserProfileIfMissing(params: { user_id: string; email: string; role: UserRole }) {
+  const existing = getUserProfile(params.user_id);
+  if (existing) return existing;
+  const now = Date.now();
+  db.prepare(
+    `
+      INSERT INTO user_profiles (user_id, email, role, disabled, created_at, updated_at, last_login_at)
+      VALUES (?, ?, ?, 0, ?, ?, NULL)
+    `
+  ).run(params.user_id, params.email.toLowerCase(), params.role, now, now);
+  return getUserProfile(params.user_id);
+}
+
 export function updateUserRole(userId: string, role: UserRole) {
   db.prepare(
     `
@@ -828,6 +921,28 @@ export function getUserDropPermission(userId: string, dropId: number) {
     | undefined;
 }
 
+export function listDropsForOwnerAccess(ownerUserId: string) {
+  return db
+    .prepare(
+      `
+        SELECT d.id, d.name, d.created_at,
+               p.can_ingest, p.can_query
+        FROM user_drop_permissions p
+        INNER JOIN drops d ON d.id = p.drop_id
+        WHERE p.user_id = ?
+          AND (p.can_ingest = 1 OR p.can_query = 1)
+        ORDER BY d.created_at DESC
+      `
+    )
+    .all(ownerUserId) as Array<{
+    id: number;
+    name: string;
+    created_at: number;
+    can_ingest: number;
+    can_query: number;
+  }>;
+}
+
 export function setUserDropPermissions(
   userId: string,
   permissions: Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>
@@ -849,7 +964,21 @@ export function setUserDropPermissions(
   tx(permissions);
 }
 
-export function listServiceAccounts() {
+export function hasAnyUserDropPermissions(userId: string) {
+  const row = db
+    .prepare(
+      `
+        SELECT 1 as ok
+        FROM user_drop_permissions
+        WHERE user_id = ?
+        LIMIT 1
+      `
+    )
+    .get(userId) as { ok: number } | undefined;
+  return Boolean(row?.ok);
+}
+
+export function listServiceAccounts(ownerUserId: string) {
   return db
     .prepare(
       `
@@ -857,10 +986,11 @@ export function listServiceAccounts() {
              up.email as created_by_email
       FROM service_accounts sa
       LEFT JOIN user_profiles up ON up.user_id = sa.created_by_user_id
+      WHERE sa.created_by_user_id = ?
       ORDER BY sa.created_at DESC
       `
     )
-    .all() as Array<{
+    .all(ownerUserId) as Array<{
     id: number;
     name: string;
     created_by_user_id: string;
@@ -892,8 +1022,10 @@ export function createServiceAccount(name: string, createdByUserId: string) {
     .get(id);
 }
 
-export function deleteServiceAccount(id: number) {
-  return db.prepare(`DELETE FROM service_accounts WHERE id = ?`).run(id).changes > 0;
+export function deleteServiceAccountOwned(id: number, ownerUserId: string) {
+  return (
+    db.prepare(`DELETE FROM service_accounts WHERE id = ? AND created_by_user_id = ?`).run(id, ownerUserId).changes > 0
+  );
 }
 
 export function listApiKeys(serviceAccountId?: number) {
@@ -911,6 +1043,24 @@ export function listApiKeys(serviceAccountId?: number) {
     `
   );
   return serviceAccountId ? stmt.all(serviceAccountId) : stmt.all();
+}
+
+export function listApiKeysForOwner(ownerUserId: string, serviceAccountId?: number) {
+  const clause = serviceAccountId ? 'AND k.service_account_id = ?' : '';
+  const stmt = db.prepare(
+    `
+      SELECT k.id, k.service_account_id, k.name, k.key_prefix, k.created_by_user_id, k.created_at, k.revoked_at,
+             sa.name as service_account_name,
+             up.email as created_by_email
+      FROM api_keys k
+      INNER JOIN service_accounts sa ON sa.id = k.service_account_id
+      LEFT JOIN user_profiles up ON up.user_id = k.created_by_user_id
+      WHERE sa.created_by_user_id = ?
+      ${clause}
+      ORDER BY k.created_at DESC
+    `
+  );
+  return serviceAccountId ? stmt.all(ownerUserId, serviceAccountId) : stmt.all(ownerUserId);
 }
 
 export function getServiceAccountById(id: number) {
@@ -968,6 +1118,24 @@ export function revokeApiKey(id: number) {
     db
       .prepare(`UPDATE api_keys SET revoked_at = (unixepoch() * 1000) WHERE id = ? AND revoked_at IS NULL`)
       .run(id).changes > 0
+  );
+}
+
+export function revokeApiKeyOwned(apiKeyId: number, ownerUserId: string) {
+  return (
+    db
+      .prepare(
+        `
+          UPDATE api_keys
+          SET revoked_at = (unixepoch() * 1000)
+          WHERE id = ?
+            AND revoked_at IS NULL
+            AND service_account_id IN (
+              SELECT id FROM service_accounts WHERE created_by_user_id = ?
+            )
+        `
+      )
+      .run(apiKeyId, ownerUserId).changes > 0
   );
 }
 
@@ -1074,6 +1242,27 @@ export function listApiKeyUsage(apiKeyId?: number, limit = 200, offset = 0) {
     `
   );
   return apiKeyId ? stmt.all(apiKeyId, lim, off) : stmt.all(lim, off);
+}
+
+export function listApiKeyUsageForOwner(ownerUserId: string, apiKeyId?: number, limit = 200, offset = 0) {
+  const lim = clampLimit(limit);
+  const off = clampOffset(offset);
+  const clause = apiKeyId ? 'AND u.api_key_id = ?' : '';
+  const stmt = db.prepare(
+    `
+      SELECT u.id, u.api_key_id, u.drop_id, u.method, u.path, u.status_code, u.ip_address, u.user_agent, u.created_at,
+             k.key_prefix, k.name as api_key_name,
+             sa.name as service_account_name
+      FROM api_key_usage u
+      INNER JOIN api_keys k ON k.id = u.api_key_id
+      INNER JOIN service_accounts sa ON sa.id = k.service_account_id
+      WHERE sa.created_by_user_id = ?
+      ${clause}
+      ORDER BY u.created_at DESC
+      LIMIT ? OFFSET ?
+    `
+  );
+  return apiKeyId ? stmt.all(ownerUserId, apiKeyId, lim, off) : stmt.all(ownerUserId, lim, off);
 }
 
 export interface TraceQuery {

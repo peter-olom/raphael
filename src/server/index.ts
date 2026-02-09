@@ -13,6 +13,7 @@ import { pruneByRetention } from './db/sqlite.js';
 import { auth, authMiddleware, ensureAdminSeed, getAuthConfigSummary } from './auth.js';
 import { toNodeHandler } from 'better-auth/node';
 import { adminRouter } from './routes/admin.js';
+import { accountRouter } from './routes/account.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,6 +43,9 @@ app.use('/', queryRouter);
 
 // Admin routes
 app.use('/api/admin', adminRouter);
+
+// Account routes (session-only, mine-only)
+app.use('/api/account', accountRouter);
 
 // API routes
 app.use('/api', apiRouter);

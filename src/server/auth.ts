@@ -7,10 +7,13 @@ import { genericOAuth } from 'better-auth/plugins';
 import {
   DB_PATH,
   countUserProfiles,
+  getAppSetting,
   getUserDropPermission,
   getUserProfile,
+  hasAnyUserDropPermissions,
   listUserDropPermissions,
   logApiKeyUsage,
+  setUserDropPermissions,
   upsertUserProfile,
   getApiKeyByHash,
   getApiKeyPermissions,
@@ -131,6 +134,72 @@ const sessionExpiresIn =
 
 const baseURL = process.env.BETTER_AUTH_BASE_URL || process.env.BETTER_AUTH_URL;
 
+function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function normalizeDomain(value: string) {
+  return value.trim().toLowerCase().replace(/^@+/, '');
+}
+
+function parseJsonArraySetting(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((x) => String(x)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function oauthOnlyMode() {
+  return authEnabled() && !emailPasswordEnabled;
+}
+
+function getOauthAllowlist() {
+  const allowedDomains = parseJsonArraySetting(getAppSetting('raphael.auth.allowed_domains'))
+    .map(normalizeDomain)
+    .filter(Boolean);
+  const allowedEmails = parseJsonArraySetting(getAppSetting('raphael.auth.allowed_emails'))
+    .map(normalizeEmail)
+    .filter(Boolean);
+  return { allowedDomains, allowedEmails };
+}
+
+function getOauthDefaultPermissions() {
+  const raw = getAppSetting('raphael.auth.oauth_default_permissions');
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((p) => ({
+        drop_id: Number((p as any)?.drop_id),
+        can_ingest: Boolean((p as any)?.can_ingest),
+        can_query: Boolean((p as any)?.can_query),
+      }))
+      .filter((p) => Number.isFinite(p.drop_id) && (p.can_ingest || p.can_query));
+  } catch {
+    return [];
+  }
+}
+
+function isOauthEmailAllowed(emailRaw: string) {
+  const email = normalizeEmail(emailRaw || '');
+  if (!email) return false;
+
+  const adminEmail = normalizeEmail((process.env.RAPHAEL_ADMIN_EMAIL || '').trim());
+  if (adminEmail && email === adminEmail) return true;
+
+  const { allowedDomains, allowedEmails } = getOauthAllowlist();
+  if (allowedDomains.length === 0 && allowedEmails.length === 0) return true;
+
+  const domain = email.split('@')[1] || '';
+  if (allowedEmails.includes(email)) return true;
+  if (domain && allowedDomains.includes(domain)) return true;
+  return false;
+}
+
 export const auth: ReturnType<typeof betterAuth> = betterAuth({
   appName: 'Raphael',
   database: authDb,
@@ -144,6 +213,29 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
     accountLinking: {
       enabled: true,
       allowDifferentEmails: false,
+    },
+  },
+  databaseHooks: {
+    user: {
+      create: {
+        before: async (user) => {
+          if (!oauthOnlyMode()) return;
+          const email = (user as any)?.email?.toString?.() ?? '';
+          if (!isOauthEmailAllowed(email)) return false;
+        },
+      },
+    },
+    session: {
+      create: {
+        before: async (session) => {
+          if (!oauthOnlyMode()) return;
+          const userId = (session as any)?.userId?.toString?.() ?? '';
+          if (!userId) return false;
+          const row = authDb.prepare(`SELECT email FROM user WHERE id = ?`).get(userId) as { email?: string } | undefined;
+          const email = row?.email?.toString?.() ?? '';
+          if (!isOauthEmailAllowed(email)) return false;
+        },
+      },
     },
   },
   plugins,
@@ -161,10 +253,30 @@ function providerLabel(providerId: string) {
 }
 
 export function getAuthConfigSummary() {
+  const enabled = authEnabled();
+  const providers = providerList.map((id) => ({ id, label: providerLabel(id) }));
+  const mode: 'disabled' | 'oauth_only' | 'password_only' | 'hybrid' = !enabled
+    ? 'disabled'
+    : emailPasswordEnabled && providers.length > 0
+      ? 'hybrid'
+      : emailPasswordEnabled
+        ? 'password_only'
+        : 'oauth_only';
+
+  const allow = getOauthAllowlist();
+
   return {
-    enabled: authEnabled(),
+    enabled,
+    mode,
     email_password_enabled: emailPasswordEnabled,
-    providers: providerList.map((id) => ({ id, label: providerLabel(id) })),
+    providers,
+    oauth_allowlist: {
+      enabled: mode === 'oauth_only',
+      domains_count: allow.allowedDomains.length,
+      emails_count: allow.allowedEmails.length,
+    },
+    base_url_set: Boolean(baseURL),
+    trusted_origins_set: Boolean(trustedOrigins && trustedOrigins.length > 0),
   };
 }
 
@@ -206,6 +318,22 @@ export async function ensureUserProfile(user: { id: string; email: string }) {
     last_login_at: Date.now(),
   });
 
+  // In OAuth-only mode, we can auto-assign default drop permissions to newly created member users.
+  // This avoids the common "can sign in but cannot see anything" first-run experience.
+  try {
+    if (oauthOnlyMode() && updated?.role === 'member') {
+      const hasAny = hasAnyUserDropPermissions(user.id);
+      if (!hasAny) {
+        const defaults = getOauthDefaultPermissions();
+        if (defaults.length > 0) {
+          setUserDropPermissions(user.id, defaults);
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to apply OAuth default permissions:', error);
+  }
+
   return updated;
 }
 
@@ -234,7 +362,7 @@ export async function ensureAdminSeed() {
   }
 
   try {
-    const ctx = auth.$context as any;
+    const ctx = (await auth.$context) as any;
     if (!ctx?.password || !ctx?.internalAdapter?.updatePassword) return;
     const userId = row?.id ?? (authDb.prepare(`SELECT id FROM user WHERE email = ?`).get(normalized) as { id: string } | undefined)?.id;
     if (!userId) return;

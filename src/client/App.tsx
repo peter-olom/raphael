@@ -59,17 +59,28 @@ const styles = {
     flexDirection: 'column' as const,
   },
   header: {
-    background: '#1a1a1a',
-    padding: '16px 24px',
-    borderBottom: '1px solid #333',
+    position: 'sticky' as const,
+    top: 0,
+    zIndex: 100,
+    height: '72px',
+    boxSizing: 'border-box' as const,
+    background: 'rgba(14, 14, 14, 0.86)',
+    backdropFilter: 'blur(12px)',
+    borderBottom: '1px solid rgba(255,255,255,0.10)',
+    padding: '14px 24px',
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
   logo: {
     fontSize: '24px',
-    fontWeight: 700,
+    fontWeight: 900,
     color: '#fff',
+    letterSpacing: '-0.01em',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '10px',
+    textShadow: '0 10px 30px rgba(0,0,0,0.55)',
   },
   stats: {
     display: 'flex',
@@ -92,10 +103,18 @@ const styles = {
     display: 'flex',
     flexDirection: 'column' as const,
   },
+  stickyNav: {
+    position: 'sticky' as const,
+    top: '72px',
+    zIndex: 80,
+    background: 'rgba(12, 12, 12, 0.86)',
+    backdropFilter: 'blur(12px)',
+    borderBottom: '1px solid rgba(255,255,255,0.10)',
+  },
   tabs: {
     display: 'flex',
-    background: '#1a1a1a',
-    borderBottom: '1px solid #333',
+    background: 'transparent',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
   },
   tab: {
     padding: '12px 24px',
@@ -113,7 +132,7 @@ const styles = {
   },
   toolbar: {
     padding: '12px 24px',
-    background: '#151515',
+    background: 'transparent',
     display: 'flex',
     gap: '12px',
     alignItems: 'center',
@@ -272,15 +291,20 @@ const styles = {
     flex: 1,
     overflow: 'auto',
     padding: '16px 24px',
+    background: '#0b0b0b',
   },
   table: {
     width: '100%',
     borderCollapse: 'collapse' as const,
   },
   th: {
+    position: 'sticky' as const,
+    top: 0,
+    zIndex: 5,
     textAlign: 'left' as const,
     padding: '12px',
     borderBottom: '1px solid #333',
+    background: '#0b0b0b',
     color: '#888',
     fontSize: '12px',
     fontWeight: 600,
@@ -1633,8 +1657,25 @@ function TraceDetailModal({
 }
 
 export default function App() {
+  type SettingsTab = 'account' | 'drops' | 'service_accounts' | 'auth' | 'users' | 'integrations';
+  type AuthMode = 'disabled' | 'oauth_only' | 'password_only' | 'hybrid';
+
   const parseTab = (value: string | null): Tab | null => {
     if (value === 'events' || value === 'traces' || value === 'dashboards' || value === 'settings') return value;
+    return null;
+  };
+
+  const parseSettingsTab = (value: string | null): SettingsTab | null => {
+    if (
+      value === 'account' ||
+      value === 'drops' ||
+      value === 'service_accounts' ||
+      value === 'auth' ||
+      value === 'users' ||
+      value === 'integrations'
+    ) {
+      return value;
+    }
     return null;
   };
 
@@ -1643,23 +1684,55 @@ export default function App() {
     parseTab(window.location.hash.replace(/^#/, '')) ??
     'events';
 
+  const initialSettingsTab: SettingsTab =
+    parseSettingsTab(new URLSearchParams(window.location.search).get('settings')) ?? 'account';
+
   const [tab, setTab] = useState<Tab>(initialTab);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(initialSettingsTab);
   const [authEnabled, setAuthEnabled] = useState<boolean | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>('disabled');
   const [authProviders, setAuthProviders] = useState<Array<{ id: string; label: string }>>([]);
   const [authEmailPasswordEnabled, setAuthEmailPasswordEnabled] = useState(false);
+  const [authAllowlistSummary, setAuthAllowlistSummary] = useState<{ enabled: boolean; domains_count: number; emails_count: number } | null>(null);
+  const [authBaseUrlSet, setAuthBaseUrlSet] = useState(false);
+  const [authTrustedOriginsSet, setAuthTrustedOriginsSet] = useState(false);
   const [authUser, setAuthUser] = useState<{ id: string; email: string; role: 'admin' | 'member' } | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [users, setUsers] = useState<
-    Array<{ user_id: string; email: string; role: 'admin' | 'member'; disabled: number; created_at: number; last_login_at: number | null }>
+    Array<{
+      user_id: string;
+      email: string;
+      role: 'admin' | 'member';
+      disabled: number;
+      protected_admin?: boolean;
+      created_at: number;
+      last_login_at: number | null;
+    }>
   >([]);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [selectedUserRole, setSelectedUserRole] = useState<'admin' | 'member'>('member');
   const [selectedUserDisabled, setSelectedUserDisabled] = useState(false);
   const [userPermissions, setUserPermissions] = useState<Array<{ drop_id: number; can_ingest: number; can_query: number }>>([]);
   const [userSaving, setUserSaving] = useState(false);
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserRole, setNewUserRole] = useState<'admin' | 'member'>('member');
+  const [newUserPermissions, setNewUserPermissions] = useState<
+    Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>
+  >([]);
+  const [newUserCreating, setNewUserCreating] = useState(false);
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [createdUserCreds, setCreatedUserCreds] = useState<null | { email: string; password: string; role: 'admin' | 'member' }>(null);
+  const [authPolicyDomains, setAuthPolicyDomains] = useState('');
+  const [authPolicyEmails, setAuthPolicyEmails] = useState('');
+  const [authPolicyDefaultPermissions, setAuthPolicyDefaultPermissions] = useState<
+    Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>
+  >([]);
+  const [authPolicySaving, setAuthPolicySaving] = useState(false);
+  const [authPolicyError, setAuthPolicyError] = useState<string | null>(null);
   const [serviceAccounts, setServiceAccounts] = useState<
     Array<{ id: number; name: string; created_at: number; created_by_email: string | null }>
   >([]);
@@ -1683,6 +1756,8 @@ export default function App() {
   const [generatedApiKey, setGeneratedApiKey] = useState<string | null>(null);
   const [generatedApiKeyMeta, setGeneratedApiKeyMeta] = useState<string | null>(null);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [accountDrops, setAccountDrops] = useState<Array<{ id: number; name: string; can_ingest: number; can_query: number }>>([]);
+  const [accountDropsLoaded, setAccountDropsLoaded] = useState(false);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [events, setEvents] = useState<WideEvent[]>([]);
   const [stats, setStats] = useState<Stats>({ traces: 0, wideEvents: 0, errors: 0 });
@@ -1725,16 +1800,58 @@ export default function App() {
   const authReady = authEnabled === false || authUser !== null;
   const isAdmin = authUser?.role === 'admin';
   const isMember = authActive && !isAdmin;
+  const dataLocked =
+    authActive &&
+    !isAdmin &&
+    accountDropsLoaded &&
+    !accountDrops.some((d) => Boolean(d.can_query));
   const authClient = useMemo(() => createAuthClient({ baseURL: window.location.origin }), []);
 
-  // Persist tab selection per browser tab via URL (refresh-safe).
+  const dropLabel = useCallback(
+    (id: number) => {
+      const fromAll = drops.find((d) => d.id === id)?.name;
+      const fromAccount = accountDrops.find((d) => d.id === id)?.name;
+      const name = fromAll || fromAccount;
+      return name ? `${name} (#${id})` : `Drop #${id}`;
+    },
+    [drops, accountDrops]
+  );
+
+  useEffect(() => {
+    if (tab !== 'settings') return;
+    if (!authReady) return;
+    // When auth is enabled, non-admins cannot access admin-only settings tabs.
+    const adminOnly = settingsTab === 'users' || settingsTab === 'auth' || settingsTab === 'integrations';
+    if (authActive && !isAdmin && adminOnly) {
+      setSettingsTab('account');
+    }
+  }, [tab, settingsTab, authActive, isAdmin, authReady]);
+
+  useEffect(() => {
+    if (!authReady) return;
+    if (!dataLocked) return;
+    if (tab !== 'settings') {
+      setTab('settings');
+      setSettingsTab('account');
+    }
+  }, [authReady, dataLocked, tab]);
+
+  // Persist tab + settings sub-tab selection via URL (refresh-safe).
   useEffect(() => {
     const url = new URL(window.location.href);
-    if (url.searchParams.get('tab') !== tab) {
-      url.searchParams.set('tab', tab);
-      window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    url.searchParams.set('tab', tab);
+    if (tab === 'settings') {
+      url.searchParams.set('settings', settingsTab);
+    } else {
+      url.searchParams.delete('settings');
     }
-  }, [tab]);
+    if (dropId !== null) {
+      url.searchParams.set('drop', String(dropId));
+    } else {
+      url.searchParams.delete('drop');
+    }
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [tab, settingsTab, dropId]);
 
   useEffect(() => {
     window.localStorage.setItem('raphael.dashboardMode', dashboardMode);
@@ -1763,14 +1880,22 @@ export default function App() {
         const res = await fetch('/api/auth/config');
         const json = (await res.json()) as {
           enabled?: boolean;
+          mode?: 'disabled' | 'oauth_only' | 'password_only' | 'hybrid';
           email_password_enabled?: boolean;
           providers?: Array<{ id: string; label: string }>;
+          oauth_allowlist?: { enabled: boolean; domains_count: number; emails_count: number };
+          base_url_set?: boolean;
+          trusted_origins_set?: boolean;
         };
         if (cancelled) return;
         const enabled = Boolean(json?.enabled);
         setAuthEnabled(enabled);
+        setAuthMode(json?.mode ?? (enabled ? 'oauth_only' : 'disabled'));
         setAuthEmailPasswordEnabled(Boolean(json?.email_password_enabled));
         setAuthProviders(json?.providers ?? []);
+        setAuthAllowlistSummary(json?.oauth_allowlist ?? null);
+        setAuthBaseUrlSet(Boolean(json?.base_url_set));
+        setAuthTrustedOriginsSet(Boolean(json?.trusted_origins_set));
         setAuthError(null);
         if (!enabled) {
           setAuthUser(null);
@@ -1781,6 +1906,7 @@ export default function App() {
         if (cancelled) return;
         console.error('Failed to fetch auth config:', error);
         setAuthEnabled(false);
+        setAuthMode('disabled');
         setAuthError('Failed to load auth config');
       }
     })();
@@ -1797,13 +1923,17 @@ export default function App() {
         parseTab(new URLSearchParams(window.location.search).get('tab')) ??
         parseTab(window.location.hash.replace(/^#/, ''));
       if (next && next !== tab) setTab(next);
+
+      const nextSettings = parseSettingsTab(new URLSearchParams(window.location.search).get('settings'));
+      if (nextSettings && nextSettings !== settingsTab) setSettingsTab(nextSettings);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [tab]);
+  }, [tab, settingsTab]);
 
   const fetchData = useCallback(async () => {
     if (!authReady) return;
+    if (dataLocked) return;
     if (dropIdRef.current === null) return;
     try {
       const [tracesRes, eventsRes, statsRes] = await Promise.all([
@@ -1817,7 +1947,7 @@ export default function App() {
     } catch (error) {
       console.error('Failed to fetch data:', error);
     }
-  }, [authReady]);
+  }, [authReady, dataLocked]);
 
   const fetchDrops = useCallback(async () => {
     if (!authReady) return;
@@ -1826,11 +1956,13 @@ export default function App() {
       const json = (await res.json()) as { default_drop_id: number; drops: Drop[] };
       setDrops(json.drops);
 
+      const urlDropRaw = new URLSearchParams(window.location.search).get('drop');
+      const urlDropId = urlDropRaw && /^\d+$/.test(urlDropRaw) ? Number.parseInt(urlDropRaw, 10) : null;
       const stored = window.localStorage.getItem('raphael.dropId');
       const storedId = stored && /^\d+$/.test(stored) ? Number.parseInt(stored, 10) : null;
-      const desired = storedId ?? json.default_drop_id;
+      const desired = urlDropId ?? storedId ?? json.default_drop_id;
       const exists = json.drops.some((d) => d.id === desired);
-      setDropId(exists ? desired : json.default_drop_id);
+      setDropId(exists ? desired : json.drops[0]?.id ?? null);
     } catch (error) {
       console.error('Failed to fetch drops:', error);
       setDropId(1);
@@ -1856,9 +1988,9 @@ export default function App() {
   }, [dashboardSelectedId, authReady]);
 
   const fetchServiceAccounts = useCallback(async () => {
-    if (!authActive || !authUser || !isAdmin) return;
+    if (!authActive || !authUser) return;
     try {
-      const res = await fetch('/api/admin/service-accounts');
+      const res = await fetch('/api/account/service-accounts');
       if (!res.ok) throw new Error('Failed to load service accounts');
       const rows = (await res.json()) as Array<{ id: number; name: string; created_at: number; created_by_email: string | null }>;
       setServiceAccounts(rows);
@@ -1868,12 +2000,12 @@ export default function App() {
     } catch (error) {
       console.error('Failed to fetch service accounts:', error);
     }
-  }, [authActive, authUser, isAdmin, selectedServiceAccountId]);
+  }, [authActive, authUser, selectedServiceAccountId]);
 
   const fetchApiKeys = useCallback(async () => {
-    if (!authActive || !authUser || !isAdmin) return;
+    if (!authActive || !authUser) return;
     try {
-      const res = await fetch('/api/admin/api-keys');
+      const res = await fetch('/api/account/api-keys');
       if (!res.ok) throw new Error('Failed to load API keys');
       const rows = (await res.json()) as Array<{
         id: number;
@@ -1888,11 +2020,38 @@ export default function App() {
     } catch (error) {
       console.error('Failed to fetch API keys:', error);
     }
-  }, [authActive, authUser, isAdmin]);
+  }, [authActive, authUser]);
+
+  const fetchAccountDrops = useCallback(async () => {
+    if (!authActive || !authUser) return;
+    try {
+      setAccountDropsLoaded(false);
+      const res = await fetch('/api/account/drops');
+      if (!res.ok) throw new Error('Failed to load drops');
+      const json = (await res.json()) as { drops: Array<{ id: number; name: string; can_ingest: number; can_query: number }> };
+      setAccountDrops(json.drops ?? []);
+    } catch (error) {
+      console.error('Failed to fetch account drops:', error);
+      setAccountDrops([]);
+    } finally {
+      setAccountDropsLoaded(true);
+    }
+  }, [authActive, authUser]);
 
   const refreshAuthAssets = useCallback(async () => {
-    await Promise.all([fetchServiceAccounts(), fetchApiKeys()]);
-  }, [fetchServiceAccounts, fetchApiKeys]);
+    await Promise.all([fetchAccountDrops(), fetchServiceAccounts(), fetchApiKeys()]);
+  }, [fetchAccountDrops, fetchServiceAccounts, fetchApiKeys]);
+
+  // Keep account drop permissions fresh so we can gate UX when a user has no query access.
+  useEffect(() => {
+    if (!authReady) return;
+    if (!authActive || !authUser) {
+      setAccountDrops([]);
+      setAccountDropsLoaded(false);
+      return;
+    }
+    void fetchAccountDrops();
+  }, [authReady, authActive, authUser, fetchAccountDrops]);
 
   const fetchUsers = useCallback(async () => {
     if (!authActive || !authUser || !isAdmin) return;
@@ -1904,6 +2063,7 @@ export default function App() {
         email: string;
         role: 'admin' | 'member';
         disabled: number;
+        protected_admin?: boolean;
         created_at: number;
         last_login_at: number | null;
       }>;
@@ -1919,6 +2079,80 @@ export default function App() {
       console.error('Failed to fetch users:', error);
     }
   }, [authActive, authUser, isAdmin, selectedUserId]);
+
+  const fetchAuthPolicy = useCallback(async () => {
+    if (!authActive || !authUser || !isAdmin) return;
+    try {
+      setAuthPolicyError(null);
+      const res = await fetch('/api/admin/auth-policy');
+      const json = (await res.json()) as {
+        oauth_only?: boolean;
+        allowed_domains?: string[];
+        allowed_emails?: string[];
+        default_permissions?: Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(json?.error || 'Failed to load auth policy');
+      const domains = (json.allowed_domains ?? []).join('\n');
+      const emails = (json.allowed_emails ?? []).join('\n');
+      setAuthPolicyDomains(domains);
+      setAuthPolicyEmails(emails);
+      setAuthPolicyDefaultPermissions(
+        (json.default_permissions ?? []).map((p) => ({
+          drop_id: Number(p.drop_id),
+          can_ingest: Boolean(p.can_ingest),
+          can_query: Boolean(p.can_query),
+        }))
+      );
+    } catch (error) {
+      console.error('Failed to fetch auth policy:', error);
+      setAuthPolicyError((error as Error).message);
+    }
+  }, [authActive, authUser, isAdmin]);
+
+  const saveAuthPolicy = useCallback(async () => {
+    if (!authActive || !authUser || !isAdmin) return;
+    setAuthPolicySaving(true);
+    setAuthPolicyError(null);
+    try {
+      const domains = authPolicyDomains
+        .split(/[\n,]/g)
+        .map((d) => d.trim())
+        .filter(Boolean);
+      const emails = authPolicyEmails
+        .split(/[\n,]/g)
+        .map((e) => e.trim())
+        .filter(Boolean);
+      const res = await fetch('/api/admin/auth-policy', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowed_domains: domains, allowed_emails: emails, default_permissions: authPolicyDefaultPermissions }),
+      });
+      const json = (await res.json()) as {
+        allowed_domains?: string[];
+        allowed_emails?: string[];
+        default_permissions?: Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(json?.error || 'Failed to save auth policy');
+      setAuthPolicyDomains((json.allowed_domains ?? []).join('\n'));
+      setAuthPolicyEmails((json.allowed_emails ?? []).join('\n'));
+      setAuthPolicyDefaultPermissions(
+        (json.default_permissions ?? []).map((p) => ({
+          drop_id: Number(p.drop_id),
+          can_ingest: Boolean(p.can_ingest),
+          can_query: Boolean(p.can_query),
+        }))
+      );
+      setAppToast('Auth policy saved');
+      await fetchAuthPolicy();
+    } catch (error) {
+      console.error('Failed to save auth policy:', error);
+      setAuthPolicyError((error as Error).message);
+    } finally {
+      setAuthPolicySaving(false);
+    }
+  }, [authActive, authUser, isAdmin, authPolicyDomains, authPolicyEmails, authPolicyDefaultPermissions, fetchAuthPolicy]);
 
   const fetchUserPermissions = useCallback(
     async (userId: string) => {
@@ -1959,6 +2193,73 @@ export default function App() {
       setUserSaving(false);
     }
   }, [selectedUserId, selectedUserRole, selectedUserDisabled, authUser]);
+
+  const generatePassword = useCallback(() => {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    let out = '';
+    for (const b of bytes) out += alphabet[b % alphabet.length];
+    setNewUserPassword(out);
+  }, []);
+
+  const handleCreateUser = useCallback(async () => {
+    if (!newUserEmail.trim() || !newUserPassword.trim()) {
+      setAppToast('Email and password are required');
+      return;
+    }
+    const permissions = newUserPermissions.filter((p) => p.can_ingest || p.can_query);
+    if (newUserRole !== 'admin' && permissions.length === 0) {
+      setAppToast('Assign at least one drop permission (ingest or query)');
+      return;
+    }
+    setNewUserCreating(true);
+    try {
+      const email = newUserEmail.trim();
+      const password = newUserPassword;
+      const res = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+          role: newUserRole,
+          permissions,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Failed to create user');
+      setCreatedUserCreds({ email, password, role: newUserRole });
+      setAppToast('User created');
+      await fetchUsers();
+      if (json?.user_id) setSelectedUserId(json.user_id);
+    } catch (error) {
+      console.error('Failed to create user:', error);
+      setAppToast((error as Error).message || 'Failed to create user');
+    } finally {
+      setNewUserCreating(false);
+    }
+  }, [newUserEmail, newUserPassword, newUserRole, newUserPermissions, fetchUsers]);
+
+  const openAddUserModal = useCallback(() => {
+    setCreatedUserCreds(null);
+    setNewUserEmail('');
+    setNewUserPassword('');
+    setNewUserRole('member');
+    const defaultDropId = dropId ?? drops[0]?.id ?? null;
+    setNewUserPermissions(defaultDropId ? [{ drop_id: defaultDropId, can_ingest: false, can_query: true }] : []);
+    setShowAddUserModal(true);
+  }, [dropId, drops]);
+
+  const closeAddUserModal = useCallback(() => {
+    if (newUserCreating) return;
+    setShowAddUserModal(false);
+    setCreatedUserCreds(null);
+    setNewUserEmail('');
+    setNewUserPassword('');
+    setNewUserRole('member');
+    setNewUserPermissions([]);
+  }, [newUserCreating]);
 
   const handleSaveUserPermissions = useCallback(async () => {
     if (!selectedUserId) return;
@@ -2039,13 +2340,15 @@ export default function App() {
       setAuthUser(null);
       setServiceAccounts([]);
       setApiKeys([]);
+      setAccountDrops([]);
+      setAccountDropsLoaded(false);
     }
   }, [authClient]);
 
   const handleCreateServiceAccount = useCallback(async () => {
     if (!newServiceAccountName.trim()) return;
     try {
-      const res = await fetch('/api/admin/service-accounts', {
+      const res = await fetch('/api/account/service-accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newServiceAccountName }),
@@ -2060,6 +2363,23 @@ export default function App() {
     }
   }, [newServiceAccountName, refreshAuthAssets]);
 
+  const handleDeleteServiceAccount = useCallback(
+    async (id: number) => {
+      if (!confirm('Delete this service account? This will revoke all associated API keys.')) return;
+      try {
+        const res = await fetch(`/api/account/service-accounts/${id}`, { method: 'DELETE' });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.error || 'Failed to delete service account');
+        if (selectedServiceAccountId === id) setSelectedServiceAccountId(null);
+        await refreshAuthAssets();
+      } catch (error) {
+        console.error('Failed to delete service account:', error);
+        setAppToast('Failed to delete service account');
+      }
+    },
+    [refreshAuthAssets, selectedServiceAccountId]
+  );
+
   const handleCreateApiKey = useCallback(async () => {
     if (!selectedServiceAccountId) return;
     if (!apiKeyDropId) {
@@ -2071,7 +2391,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch('/api/admin/api-keys', {
+      const res = await fetch('/api/account/api-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2102,7 +2422,7 @@ export default function App() {
   const handleRevokeApiKey = useCallback(async (id: number) => {
     if (!confirm('Revoke this API key? This cannot be undone.')) return;
     try {
-      const res = await fetch(`/api/admin/api-keys/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/account/api-keys/${id}`, { method: 'DELETE' });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || 'Failed to revoke API key');
       await refreshAuthAssets();
@@ -2159,6 +2479,7 @@ export default function App() {
 
   useEffect(() => {
     if (!authReady) return;
+    if (dataLocked) return;
     if (dropId === null) return;
     dropIdRef.current = dropId;
     window.localStorage.setItem('raphael.dropId', String(dropId));
@@ -2177,7 +2498,7 @@ export default function App() {
     fetchData();
     fetchDashboards();
     subscribeWs(dropId);
-  }, [dropId, drops, fetchData, subscribeWs, fetchDashboards, authReady]);
+  }, [dropId, drops, fetchData, subscribeWs, fetchDashboards, authReady, dataLocked]);
 
   useEffect(() => {
     if (tab !== 'dashboards') return;
@@ -2188,6 +2509,7 @@ export default function App() {
   useEffect(() => {
     if (!authReady) return;
     if (tab !== 'settings') return;
+    if (settingsTab !== 'integrations') return;
     if (authActive && !isAdmin) return;
     void (async () => {
       try {
@@ -2199,14 +2521,27 @@ export default function App() {
         console.error('Failed to fetch OpenRouter settings:', error);
       }
     })();
-  }, [tab, authReady]);
+  }, [tab, authReady, authActive, isAdmin, settingsTab]);
 
   useEffect(() => {
     if (tab !== 'settings') return;
-    if (!authActive || !authUser) return;
-    void refreshAuthAssets();
-    if (isAdmin) void fetchUsers();
-  }, [tab, authActive, authUser, isAdmin, refreshAuthAssets, fetchUsers]);
+    if (!authReady) return;
+
+    if (settingsTab === 'service_accounts') {
+      if (authActive && authUser) void refreshAuthAssets();
+      return;
+    }
+
+    if (settingsTab === 'users') {
+      if (isAdmin) void fetchUsers();
+      return;
+    }
+
+    if (settingsTab === 'auth') {
+      if (isAdmin) void fetchAuthPolicy();
+      return;
+    }
+  }, [tab, authReady, settingsTab, authActive, authUser, isAdmin, refreshAuthAssets, fetchUsers, fetchAuthPolicy]);
 
   useEffect(() => {
     if (!selectedUserId) return;
@@ -2219,10 +2554,36 @@ export default function App() {
   }, [selectedUserId, users, fetchUserPermissions]);
 
   useEffect(() => {
-    if (apiKeyDropId !== null) return;
-    if (dropId === null) return;
-    setApiKeyDropId(dropId);
-  }, [apiKeyDropId, dropId]);
+    if (!authActive || !authUser) return;
+    if (accountDrops.length === 0) return;
+
+    const currentDropId = dropId ?? null;
+    const hasCurrent = currentDropId !== null && accountDrops.some((d) => d.id === currentDropId);
+
+    if (apiKeyDropId === null) {
+      setApiKeyDropId(hasCurrent ? (currentDropId as number) : accountDrops[0].id);
+      return;
+    }
+    if (!accountDrops.some((d) => d.id === apiKeyDropId)) {
+      setApiKeyDropId(hasCurrent ? (currentDropId as number) : accountDrops[0].id);
+    }
+  }, [apiKeyDropId, dropId, accountDrops, authActive, authUser]);
+
+  useEffect(() => {
+    if (!authActive || !authUser) return;
+    if (apiKeyDropId === null) return;
+    const d = accountDrops.find((x) => x.id === apiKeyDropId);
+    if (!d) return;
+    const canIngest = Boolean(d.can_ingest) || isAdmin;
+    const canQuery = Boolean(d.can_query) || isAdmin;
+    if (!canIngest && apiKeyCanIngest) setApiKeyCanIngest(false);
+    if (!canQuery && apiKeyCanQuery) setApiKeyCanQuery(false);
+    if (canIngest === false && canQuery === false) {
+      // This should not happen if /api/account/drops is correct, but keep the UI safe.
+      setApiKeyCanIngest(false);
+      setApiKeyCanQuery(false);
+    }
+  }, [apiKeyDropId, accountDrops, authActive, authUser, isAdmin, apiKeyCanIngest, apiKeyCanQuery]);
 
   useEffect(() => {
     if (authActive && !authUser) return;
@@ -2800,23 +3161,133 @@ export default function App() {
 
   if (authEnabled && !authUser) {
     return (
-      <div style={{ ...styles.container, alignItems: 'center', justifyContent: 'center', background: '#0b0b0b' }}>
-        <div style={{ ...styles.pane, maxWidth: '420px', width: '100%' }}>
-          <div style={styles.paneHeader}>
-            <span style={styles.paneTitle}>Sign in</span>
-            <span style={styles.tiny}>Raphael Auth</span>
-          </div>
-          <div style={styles.paneBody}>
-            <div style={{ color: '#888', fontSize: '13px', marginBottom: '14px' }}>
-              Authentication is enabled. Sign in to continue.
-            </div>
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexDirection: 'column',
+          padding: '40px 16px',
+          position: 'relative',
+          overflow: 'hidden',
+          background:
+            'radial-gradient(1200px circle at 18% 8%, rgba(99,102,241,0.18), transparent 42%), radial-gradient(900px circle at 84% 18%, rgba(34,197,94,0.12), transparent 46%), radial-gradient(1100px circle at 52% 86%, rgba(251,191,36,0.10), transparent 55%), linear-gradient(180deg, #070707, #0b0b0b 40%, #050505)',
+        }}
+      >
+        <style>{`
+          @keyframes authIn {
+            from { opacity: 0; transform: translateY(10px) scale(0.99); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+          }
+          .auth-card { animation: authIn 260ms ease-out both; }
+          .auth-btn { transition: transform 120ms ease, background 120ms ease, border-color 120ms ease, opacity 120ms ease; }
+          .auth-btn:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); }
+          .auth-btn:active { transform: translateY(0); }
+          .auth-input { transition: border-color 120ms ease, box-shadow 120ms ease; }
+          .auth-input:focus { border-color: rgba(99,102,241,0.55); box-shadow: 0 0 0 3px rgba(99,102,241,0.14); }
+          @media (prefers-reduced-motion: reduce) {
+            .auth-card { animation: none; }
+            .auth-btn { transition: none; }
+            .auth-input { transition: none; }
+          }
+        `}</style>
 
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            opacity: 0.26,
+            backgroundImage:
+              'linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px)',
+            backgroundSize: '34px 34px',
+            maskImage: 'radial-gradient(circle at 50% 30%, rgba(0,0,0,1), rgba(0,0,0,0.05) 72%)',
+            pointerEvents: 'none',
+          }}
+        />
+
+        <div
+          style={{
+            position: 'relative',
+            zIndex: 1,
+            display: 'grid',
+            justifyItems: 'center',
+            gap: '10px',
+            marginBottom: '14px',
+            textAlign: 'center' as const,
+          }}
+        >
+          <img
+            src="/raphael-icon-192.png"
+            alt="Raphael"
+            width={96}
+            height={96}
+            style={{
+              display: 'block',
+              filter:
+                'drop-shadow(0 28px 70px rgba(0,0,0,0.62)) drop-shadow(0 14px 34px rgba(99,102,241,0.24))',
+            }}
+          />
+          <div style={{ color: '#fff', fontSize: '26px', fontWeight: 950, letterSpacing: '-0.03em' }}>Raphael</div>
+          <div style={{ color: 'rgba(255,255,255,0.62)', fontSize: '13px' }}>
+            The watcher who heals
+          </div>
+        </div>
+
+        <div
+          className="auth-card"
+          style={{
+            width: '100%',
+            maxWidth: '460px',
+            borderRadius: '16px',
+            border: '1px solid rgba(255,255,255,0.10)',
+            background: 'rgba(16,16,16,0.72)',
+            boxShadow: '0 26px 70px rgba(0,0,0,0.65)',
+            backdropFilter: 'blur(10px)',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              padding: '18px 18px 14px',
+              borderBottom: '1px solid rgba(255,255,255,0.08)',
+              background:
+                'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.00))',
+              display: 'flex',
+              alignItems: 'baseline',
+              justifyContent: 'space-between',
+              gap: '12px',
+            }}
+          >
+            <div style={{ display: 'grid', gap: '4px' }}>
+              <div style={{ color: '#fff', fontSize: '16px', fontWeight: 850, letterSpacing: '-0.01em' }}>Sign in</div>
+              <div style={{ color: 'rgba(255,255,255,0.64)', fontSize: '12px' }}>Sign in to view and query telemetry</div>
+            </div>
+            <div style={{ ...styles.badgeOutline, borderColor: 'rgba(255,255,255,0.12)', background: 'rgba(0,0,0,0.25)', color: '#e5e7eb' }}>
+              Auth enabled
+            </div>
+          </div>
+
+          <div style={{ padding: '16px 18px 18px' }}>
             {authProviders.length > 0 && (
-              <div style={{ display: 'grid', gap: '10px', marginBottom: authEmailPasswordEnabled ? '16px' : 0 }}>
+              <div style={{ display: 'grid', gap: '10px' }}>
                 {authProviders.map((provider) => (
                   <button
                     key={provider.id}
-                    style={styles.button}
+                    className="auth-btn"
+                    style={{
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '10px',
+                      border: '1px solid rgba(255,255,255,0.12)',
+                      background: 'rgba(255,255,255,0.04)',
+                      color: '#fff',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                      fontWeight: 650,
+                      textAlign: 'center',
+                    }}
                     onClick={() => handleSocialLogin(provider.id)}
                     disabled={authLoading}
                   >
@@ -2827,41 +3298,112 @@ export default function App() {
             )}
 
             {authEmailPasswordEnabled && (
-              <div style={{ display: 'grid', gap: '10px' }}>
-                <div>
-                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Email</div>
-                  <input
-                    style={styles.filterInput}
-                    placeholder="you@example.com"
-                    value={loginEmail}
-                    onChange={(e) => setLoginEmail(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
-                  />
+              <>
+                {(authProviders.length > 0) && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: '14px 0' }}>
+                    <div style={{ height: '1px', flex: 1, background: 'rgba(255,255,255,0.10)' }} />
+                    <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.55)', letterSpacing: '0.08em', textTransform: 'uppercase' as const }}>
+                      or
+                    </div>
+                    <div style={{ height: '1px', flex: 1, background: 'rgba(255,255,255,0.10)' }} />
+                  </div>
+                )}
+
+                <div style={{ display: 'grid', gap: '10px' }}>
+                  <div style={{ display: 'grid', gap: '6px' }}>
+                    <div style={{ ...styles.metaLabel, color: 'rgba(255,255,255,0.70)' }}>Email</div>
+                    <input
+                      className="auth-input"
+                      style={{
+                        width: '100%',
+                        padding: '10px 12px',
+                        borderRadius: '10px',
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        background: 'rgba(0,0,0,0.35)',
+                        color: '#fff',
+                        outline: 'none',
+                        fontSize: '14px',
+                      }}
+                      placeholder="you@example.com"
+                      value={loginEmail}
+                      onChange={(e) => setLoginEmail(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                      autoComplete="email"
+                    />
+                  </div>
+
+                  <div style={{ display: 'grid', gap: '6px' }}>
+                    <div style={{ ...styles.metaLabel, color: 'rgba(255,255,255,0.70)' }}>Password</div>
+                    <input
+                      className="auth-input"
+                      style={{
+                        width: '100%',
+                        padding: '10px 12px',
+                        borderRadius: '10px',
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        background: 'rgba(0,0,0,0.35)',
+                        color: '#fff',
+                        outline: 'none',
+                        fontSize: '14px',
+                      }}
+                      type="password"
+                      placeholder="••••••••"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                      autoComplete="current-password"
+                    />
+                  </div>
+
+                  <button
+                    className="auth-btn"
+                    style={{
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '10px',
+                      border: '1px solid rgba(99,102,241,0.55)',
+                      background: 'linear-gradient(180deg, rgba(99,102,241,0.45), rgba(99,102,241,0.22))',
+                      color: '#fff',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                      fontWeight: 750,
+                    }}
+                    onClick={handleLogin}
+                    disabled={authLoading}
+                  >
+                    {authLoading ? 'Signing in…' : 'Sign in'}
+                  </button>
                 </div>
-                <div>
-                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Password</div>
-                  <input
-                    style={styles.filterInput}
-                    type="password"
-                    placeholder="••••••••"
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
-                  />
-                </div>
-                <button style={styles.button} onClick={handleLogin} disabled={authLoading}>
-                  {authLoading ? 'Signing in…' : 'Sign in'}
-                </button>
-              </div>
+              </>
             )}
 
             {!authEmailPasswordEnabled && authProviders.length === 0 && (
-              <div style={{ color: '#888', fontSize: '13px' }}>
+              <div style={{ color: 'rgba(255,255,255,0.66)', fontSize: '13px' }}>
                 No authentication providers configured. Set provider environment variables to enable login.
               </div>
             )}
 
-            {authError && <div style={{ color: '#f87171', fontSize: '12px', marginTop: '10px' }}>{authError}</div>}
+            {authError && (
+              <div
+                style={{
+                  marginTop: '12px',
+                  padding: '10px 12px',
+                  borderRadius: '10px',
+                  border: '1px solid rgba(239,68,68,0.25)',
+                  background: 'rgba(127,29,29,0.25)',
+                  color: '#fecaca',
+                  fontSize: '12px',
+                }}
+              >
+                {authError}
+              </div>
+            )}
+
+            {import.meta.env.DEV && (
+              <div style={{ marginTop: '14px', color: 'rgba(255,255,255,0.45)', fontSize: '11px', lineHeight: 1.5 }}>
+                Tip: if you are using Vite dev (`http://localhost:5173`), set `BETTER_AUTH_BASE_URL` and `RAPHAEL_AUTH_TRUSTED_ORIGINS` to that origin.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2886,13 +3428,39 @@ export default function App() {
 
       <header style={styles.header}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={styles.logo}>Raphael</div>
-          <div style={styles.pill}>
+          <div style={styles.logo}>
+            <img
+              src="/raphael-icon-192.png"
+              alt="Raphael"
+              width={30}
+              height={30}
+              style={{
+                display: 'block',
+                filter:
+                  'drop-shadow(0 0 10px rgba(99,102,241,0.55)) drop-shadow(0 0 22px rgba(59,130,246,0.30))',
+              }}
+            />
+            Raphael
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setTab('settings');
+              setSettingsTab('drops');
+            }}
+            title="Open Drops settings"
+            style={{
+              ...styles.pill,
+              cursor: 'pointer',
+            }}
+          >
             Drop:
             <span style={{ color: '#fff' }}>
-              {drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? 'loading…' : `#${dropId}`)}
+              {dataLocked
+                ? 'No query access'
+                : drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? 'loading…' : `#${dropId}`)}
             </span>
-          </div>
+          </button>
         </div>
         <div style={styles.stats}>
           <div style={styles.stat}>
@@ -2910,55 +3478,61 @@ export default function App() {
             <div style={styles.statLabel}>Errors</div>
           </div>
         </div>
-      </header>
+	      </header>
 
-      <main style={styles.main}>
-        <div style={styles.tabs}>
-          <button
-            style={{ ...styles.tab, ...(tab === 'events' ? styles.tabActive : {}) }}
-            onClick={() => setTab('events')}
-          >
-            Wide Events
-          </button>
-          <button
-            style={{ ...styles.tab, ...(tab === 'traces' ? styles.tabActive : {}) }}
-            onClick={() => setTab('traces')}
-          >
-            Traces
-          </button>
-          <button
-            style={{ ...styles.tab, ...(tab === 'dashboards' ? styles.tabActive : {}) }}
-            onClick={() => setTab('dashboards')}
-          >
-            Dashboards
-          </button>
-          <button
-            style={{ ...styles.tab, ...(tab === 'settings' ? styles.tabActive : {}) }}
-            onClick={() => setTab('settings')}
-          >
-            Settings
-          </button>
-        </div>
+	      <main style={styles.main}>
+	        <div style={styles.stickyNav}>
+	          <div style={styles.tabs}>
+		          <button
+		            style={{
+		              ...styles.tab,
+		              ...(tab === 'events' ? styles.tabActive : {}),
+	              ...(dataLocked ? { opacity: 0.45, cursor: 'not-allowed' } : {}),
+	            }}
+	            onClick={() => setTab('events')}
+	            disabled={dataLocked}
+	            title={dataLocked ? 'No query permissions assigned' : undefined}
+		          >
+		            Wide Events
+		          </button>
+		          <button
+	            style={{
+	              ...styles.tab,
+	              ...(tab === 'traces' ? styles.tabActive : {}),
+	              ...(dataLocked ? { opacity: 0.45, cursor: 'not-allowed' } : {}),
+	            }}
+	            onClick={() => setTab('traces')}
+	            disabled={dataLocked}
+	            title={dataLocked ? 'No query permissions assigned' : undefined}
+		          >
+		            Traces
+		          </button>
+		          <button
+	            style={{
+	              ...styles.tab,
+	              ...(tab === 'dashboards' ? styles.tabActive : {}),
+	              ...(dataLocked ? { opacity: 0.45, cursor: 'not-allowed' } : {}),
+	            }}
+	            onClick={() => setTab('dashboards')}
+	            disabled={dataLocked}
+	            title={dataLocked ? 'No query permissions assigned' : undefined}
+		          >
+		            Dashboards
+		          </button>
+	          <button
+	            style={{ ...styles.tab, ...(tab === 'settings' ? styles.tabActive : {}) }}
+	            onClick={() => setTab('settings')}
+	          >
+	            Settings
+	          </button>
+	          </div>
 
-        <div style={styles.toolbar}>
-          <select
-            style={styles.select}
-            value={dropId ?? ''}
-            onChange={(e) => setDropId(Number(e.target.value))}
-            disabled={drops.length === 0}
-            title="Select Drop"
-          >
-            {drops.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
-          {tab === 'dashboards' ? (
-            <>
-              <button
-                style={styles.button}
-                onClick={() => setDashboardMode(dashboardMode === 'edit' ? 'view' : 'edit')}
+	          <div style={styles.toolbar}>
+		          {tab === 'dashboards' ? (
+		            <>
+		              <button
+		                style={styles.button}
+	                onClick={() => setDashboardMode(dashboardMode === 'edit' ? 'view' : 'edit')}
                 disabled={!dashboardSpec}
                 title={dashboardMode === 'edit' ? 'Hide config knobs' : 'Show config knobs'}
               >
@@ -3000,12 +3574,24 @@ export default function App() {
           ) : tab === 'settings' ? (
             <div style={styles.pill}>
               <span style={{ color: '#fff' }}>Settings</span>
-              <span style={{ color: '#777' }}>Configure drop retention & integrations</span>
+              <span style={{ color: '#777' }}>
+                {settingsTab === 'account'
+                  ? 'Account'
+                  : settingsTab === 'drops'
+                    ? 'Drops'
+                    : settingsTab === 'service_accounts'
+                      ? 'Service Accounts'
+                      : settingsTab === 'auth'
+                        ? 'Auth'
+                        : settingsTab === 'users'
+                          ? 'Users'
+                          : 'Integrations'}
+              </span>
             </div>
-          ) : (
-            <>
-              <input
-                type="text"
+		          ) : (
+		            <>
+		              <input
+		                type="text"
                 placeholder="Search..."
                 style={styles.searchInput}
                 value={search}
@@ -3048,13 +3634,14 @@ export default function App() {
                 {connected ? (paused ? 'Paused' : 'Live') : 'Disconnected'}
               </div>
             </>
-          )}
-        </div>
+		          )}
+	          </div>
+	        </div>
 
-        {tab !== 'dashboards' && tab !== 'settings' && showFilters && (
-          <div style={styles.filtersPanel}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '12px', marginBottom: '12px' }}>
-              <div style={{ color: '#fff', fontWeight: 700 }}>Smart Filters</div>
+	        {tab !== 'dashboards' && tab !== 'settings' && showFilters && (
+	          <div style={styles.filtersPanel}>
+	            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '12px', marginBottom: '12px' }}>
+	              <div style={{ color: '#fff', fontWeight: 700 }}>Smart Filters</div>
               <div style={{ color: '#777', fontSize: '12px' }}>
                 Suggested fields update as logs stream in (high-cardinality fields use token search).
               </div>
@@ -3722,446 +4309,1000 @@ export default function App() {
               </div>
             </div>
           ) : tab === 'settings' ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
-              <div style={styles.pane}>
-                <div style={styles.paneHeader}>
-                  <span style={styles.paneTitle}>Drop</span>
-                  <span style={styles.tiny}>
-                    Active: {drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? '-' : `#${dropId}`)}
-                  </span>
-                </div>
-                <div style={styles.paneBody}>
-                  <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px' }}>
-                    Drops isolate telemetry streams (e.g., staging vs production).
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'end' }}>
-                    <div>
-                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Create new drop</div>
-                      <input
-                        style={styles.filterInput}
-                        placeholder="Drop name (e.g., production)"
-                        value={newDropName}
-                        onChange={(e) => setNewDropName(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleCreateDrop()}
-                        disabled={isMember}
-                      />
-                    </div>
-                    <button style={styles.button} onClick={handleCreateDrop} disabled={!newDropName.trim() || isMember}>
-                      Create
-                    </button>
-                  </div>
-
-                  <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
-                    <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Ingest routing</div>
-                    <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.5 }}>
-                      Use header <span style={styles.mono}>X-Raphael-Drop</span> or query <span style={styles.mono}>?drop=</span>.
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div style={styles.pane}>
-                <div style={styles.paneHeader}>
-                  <span style={styles.paneTitle}>Retention</span>
-                  <span style={styles.tiny}>Per-drop auto-truncation</span>
-                </div>
-                <div style={styles.paneBody}>
-                  <div style={{ color: '#888', fontSize: '13px', marginBottom: '14px' }}>
-                    Set days to keep per drop (0 disables). Saving triggers an immediate prune.
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                    <div>
-                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Traces (days)</div>
-                      <input
-                        style={styles.filterInput}
-                        inputMode="numeric"
-                        value={retentionTracesDays}
-                        onChange={(e) => setRetentionTracesDays(e.target.value)}
-                        disabled={isMember}
-                      />
-                    </div>
-                    <div>
-                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Wide Events (days)</div>
-                      <input
-                        style={styles.filterInput}
-                        inputMode="numeric"
-                        value={retentionEventsDays}
-                        onChange={(e) => setRetentionEventsDays(e.target.value)}
-                        disabled={isMember}
-                      />
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '14px' }}>
-                    <button style={styles.button} onClick={handleSaveRetention} disabled={dropId === null || isMember}>
-                      Save retention
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {authActive && (
-                <div style={{ ...styles.pane, gridColumn: '1 / -1' }}>
-                  <div style={styles.paneHeader}>
-                    <span style={styles.paneTitle}>Account</span>
-                    <span style={styles.tiny}>Signed in</span>
-                  </div>
-                  <div style={styles.paneBody}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isAdmin ? '20px' : 0 }}>
-                      <div style={styles.pill}>
-                        User:
-                        <span style={{ color: '#fff' }}>{authUser?.email ?? 'unknown'}</span>
-                        <span style={{ color: '#777' }}>({authUser?.role ?? 'member'})</span>
-                      </div>
-                      <button style={styles.button} onClick={handleLogout}>
-                        Sign out
+            <div style={{ display: 'grid', gap: '16px', alignItems: 'start' }}>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                {(
+                  [
+                    { id: 'account', label: 'Account', show: true },
+                    { id: 'service_accounts', label: 'Service Accounts', show: true },
+                    { id: 'drops', label: 'Drops', show: true },
+                    { id: 'auth', label: 'Auth', show: !authActive || isAdmin },
+                    { id: 'users', label: 'Users', show: !authActive || isAdmin },
+                    { id: 'integrations', label: 'Integrations', show: !authActive || isAdmin },
+                  ] as Array<{ id: SettingsTab; label: string; show: boolean }>
+                )
+                  .filter((t) => t.show)
+                  .map((t) => {
+                    const active = settingsTab === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => setSettingsTab(t.id)}
+                        style={{
+                          padding: '8px 12px',
+                          borderRadius: '999px',
+                          border: `1px solid ${active ? 'rgba(99,102,241,0.55)' : '#222'}`,
+                          background: active ? 'rgba(99,102,241,0.16)' : '#0f0f0f',
+                          color: active ? '#fff' : '#cbd5e1',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          fontSize: '13px',
+                        }}
+                      >
+                        {t.label}
                       </button>
-                    </div>
+                    );
+                  })}
+              </div>
 
-                    {isAdmin && (
-                      <>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start', marginBottom: '20px' }}>
-                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
-                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>Users</div>
-                            <div style={{ display: 'grid', gap: '8px' }}>
-                              {users.length === 0 ? (
-                                <div style={styles.tiny}>No users yet.</div>
-                              ) : (
-                                users.map((user) => (
-                                  <div
-                                    key={user.user_id}
-                                    style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      justifyContent: 'space-between',
-                                      padding: '8px 10px',
-                                      borderRadius: '8px',
-                                      border: '1px solid #222',
-                                      background: selectedUserId === user.user_id ? '#151515' : '#0f0f0f',
-                                      cursor: 'pointer',
-                                    }}
-                                    onClick={() => setSelectedUserId(user.user_id)}
-                                  >
-                                    <div>
-                                      <div style={{ color: '#fff', fontWeight: 600 }}>{user.email}</div>
-                                      <div style={styles.tiny}>
-                                        {user.role} • {user.disabled ? 'disabled' : 'active'}
-                                      </div>
-                                    </div>
-                                    <span style={styles.tiny}>#{user.user_id.slice(0, 6)}</span>
-                                  </div>
-                                ))
-                              )}
+              {settingsTab === 'account' && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                  <div style={styles.pane}>
+                    <div style={styles.paneHeader}>
+                      <span style={styles.paneTitle}>Account</span>
+                      <span style={styles.tiny}>{authActive ? 'Signed in' : 'Auth disabled'}</span>
+                    </div>
+                    <div style={styles.paneBody}>
+                      {authActive ? (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                          <div style={styles.pill}>
+                            User:
+                            <span style={{ color: '#fff' }}>{authUser?.email ?? 'unknown'}</span>
+                            <span style={{ color: '#777' }}>({authUser?.role ?? 'member'})</span>
+                          </div>
+                          <button style={styles.button} onClick={handleLogout}>
+                            Sign out
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                          Authentication is disabled. UI access is unrestricted and API keys are not required.
+                        </div>
+                      )}
+
+                      <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
+                        <div style={{ ...styles.metaLabel, marginBottom: '8px' }}>Auth summary</div>
+                        <div style={{ display: 'grid', gap: '8px' }}>
+                          <div style={styles.pill}>
+                            Mode:
+                            <span style={{ color: '#fff' }}>{authMode}</span>
+                          </div>
+                          <div style={styles.pill}>
+                            Providers:
+                            <span style={{ color: '#fff' }}>
+                              {authProviders.length === 0 ? 'none' : authProviders.map((p) => p.label).join(', ')}
+                            </span>
+                          </div>
+                          <div style={styles.pill}>
+                            Email/password:
+                            <span style={{ color: '#fff' }}>{authEmailPasswordEnabled ? 'enabled' : 'disabled'}</span>
+                          </div>
+                          <div style={styles.pill}>
+                            Base URL:
+                            <span style={{ color: '#fff' }}>{authBaseUrlSet ? 'set' : 'missing'}</span>
+                          </div>
+                          <div style={styles.pill}>
+                            Trusted origins:
+                            <span style={{ color: '#fff' }}>{authTrustedOriginsSet ? 'set' : 'missing'}</span>
+                          </div>
+                          <div style={styles.pill}>
+                            OAuth allowlist:
+                            <span style={{ color: '#fff' }}>
+                              {authAllowlistSummary
+                                ? `${authAllowlistSummary.domains_count} domains, ${authAllowlistSummary.emails_count} emails`
+                                : 'n/a'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={styles.pane}>
+                    <div style={styles.paneHeader}>
+                      <span style={styles.paneTitle}>Dependency Map</span>
+                      <span style={styles.tiny}>What depends on what</span>
+                    </div>
+                    <div style={styles.paneBody}>
+                      <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.7 }}>
+                        <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                          <li>
+                            <span style={styles.mono}>RAPHAEL_AUTH_ENABLED=true</span> requires login for the UI and enforces drop permissions for queries and ingestion.
+                          </li>
+                          <li>Providers are enabled only when their env vars are configured (buttons appear automatically).</li>
+                          <li>
+                            OAuth allowlist is enforced only in <span style={styles.mono}>oauth_only</span> mode (email/password disabled).
+                          </li>
+                          <li>
+                            Service accounts and API keys are <b>mine-only</b>. Keys can only be minted with permissions you already have.
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {settingsTab === 'drops' && (
+                <div style={{ display: 'grid', gap: '16px' }}>
+                  {authActive && !isAdmin && (
+                    <div style={styles.pane}>
+                      <div style={styles.paneHeader}>
+                        <span style={styles.paneTitle}>Drops</span>
+                        <span style={styles.tiny}>Admin-managed</span>
+                      </div>
+                      <div style={styles.paneBody}>
+                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                          Drops are managed by admins. You can still query and ingest into drops you have access to.
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={styles.pane}>
+                    <div style={styles.paneHeader}>
+                      <span style={styles.paneTitle}>Active Drop</span>
+                      <span style={styles.tiny}>Applies across the app</span>
+                    </div>
+                    <div style={styles.paneBody}>
+                      <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+                        This selection controls what you view in <span style={styles.mono}>Wide Events</span>, <span style={styles.mono}>Traces</span>, and <span style={styles.mono}>Dashboards</span>.
+                        Drop retention and routing settings apply to the active drop.
+                      </div>
+                      <select
+                        style={{ ...styles.select, width: '100%' }}
+                        value={dropId ?? ''}
+                        onChange={(e) => setDropId(Number(e.target.value))}
+                        disabled={drops.length === 0}
+                        title="Active Drop"
+                      >
+                        {drops.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {(!authActive || isAdmin) && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                      <div style={styles.pane}>
+                        <div style={styles.paneHeader}>
+                          <span style={styles.paneTitle}>Drop Configuration</span>
+                          <span style={styles.tiny}>
+                            Active: {drops.find((d) => d.id === dropId)?.name ?? (dropId === null ? '-' : `#${dropId}`)}
+                          </span>
+                        </div>
+                        <div style={styles.paneBody}>
+                          <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px' }}>
+                            Drops isolate telemetry streams (e.g., staging vs production).
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'end' }}>
+                            <div>
+                              <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Create new drop</div>
+                              <input
+                                style={styles.filterInput}
+                                placeholder="Drop name (e.g., production)"
+                                value={newDropName}
+                                onChange={(e) => setNewDropName(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleCreateDrop()}
+                              />
+                            </div>
+                            <button style={styles.button} onClick={handleCreateDrop} disabled={!newDropName.trim()}>
+                              Create
+                            </button>
+                          </div>
+
+                          <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
+                            <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Ingest routing</div>
+                            <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.5 }}>
+                              Use header <span style={styles.mono}>X-Raphael-Drop</span> or query <span style={styles.mono}>?drop=</span>.
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={styles.pane}>
+                        <div style={styles.paneHeader}>
+                          <span style={styles.paneTitle}>Retention</span>
+                          <span style={styles.tiny}>Per-drop auto-truncation</span>
+                        </div>
+                        <div style={styles.paneBody}>
+                          <div style={{ color: '#888', fontSize: '13px', marginBottom: '14px' }}>
+                            Set days to keep per drop (0 disables). Saving triggers an immediate prune.
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                            <div>
+                              <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Traces (days)</div>
+                              <input
+                                style={styles.filterInput}
+                                inputMode="numeric"
+                                value={retentionTracesDays}
+                                onChange={(e) => setRetentionTracesDays(e.target.value)}
+                              />
+                            </div>
+                            <div>
+                              <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Wide Events (days)</div>
+                              <input
+                                style={styles.filterInput}
+                                inputMode="numeric"
+                                value={retentionEventsDays}
+                                onChange={(e) => setRetentionEventsDays(e.target.value)}
+                              />
                             </div>
                           </div>
 
-                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
-                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>Selected User</div>
-                            {!selectedUserId ? (
-                              <div style={styles.tiny}>Select a user to edit.</div>
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '14px' }}>
+                            <button style={styles.button} onClick={handleSaveRetention} disabled={dropId === null}>
+                              Save retention
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {settingsTab === 'service_accounts' && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                  {!authActive ? (
+                    <div style={{ ...styles.pane, gridColumn: '1 / -1' }}>
+                      <div style={styles.paneHeader}>
+                        <span style={styles.paneTitle}>Service Accounts</span>
+                        <span style={styles.tiny}>Auth required</span>
+                      </div>
+                      <div style={styles.paneBody}>
+                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                          Enable authentication to create service accounts and API keys.
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={styles.pane}>
+                        <div style={styles.paneHeader}>
+                          <span style={styles.paneTitle}>Service Accounts</span>
+                          <span style={styles.tiny}>Mine only</span>
+                        </div>
+                        <div style={styles.paneBody}>
+                          <div style={{ color: '#888', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+                            Service accounts are private to your user. Names are unique per user.
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'end' }}>
+                            <div>
+                              <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>New service account</div>
+                              <input
+                                style={styles.filterInput}
+                                placeholder="e.g., api-gateway"
+                                value={newServiceAccountName}
+                                onChange={(e) => setNewServiceAccountName(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleCreateServiceAccount()}
+                              />
+                            </div>
+                            <button style={styles.button} onClick={handleCreateServiceAccount} disabled={!newServiceAccountName.trim()}>
+                              Create
+                            </button>
+                          </div>
+
+                          <div style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
+                            {serviceAccounts.length === 0 ? (
+                              <div style={styles.tiny}>No service accounts yet.</div>
                             ) : (
-                              <div style={{ display: 'grid', gap: '10px' }}>
-                                <div>
-                                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Role</div>
-                                  <select
-                                    style={styles.select}
-                                    value={selectedUserRole}
-                                    onChange={(e) => setSelectedUserRole(e.target.value === 'admin' ? 'admin' : 'member')}
+                              serviceAccounts.map((sa) => (
+                                <div
+                                  key={sa.id}
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: '1fr auto',
+                                    gap: '10px',
+                                    alignItems: 'center',
+                                    padding: '8px 10px',
+                                    borderRadius: '8px',
+                                    border: '1px solid #222',
+                                    background: selectedServiceAccountId === sa.id ? '#151515' : '#0f0f0f',
+                                  }}
+                                >
+                                  <div style={{ cursor: 'pointer' }} onClick={() => setSelectedServiceAccountId(sa.id)}>
+                                    <div style={{ color: '#fff', fontWeight: 600 }}>{sa.name}</div>
+                                    <div style={styles.tiny}>Created {new Date(sa.created_at).toLocaleString()}</div>
+                                  </div>
+                                  <button
+                                    style={{ ...styles.button, ...styles.buttonDanger, padding: '6px 10px' }}
+                                    onClick={() => handleDeleteServiceAccount(sa.id)}
                                   >
-                                    <option value="member">Member</option>
-                                    <option value="admin">Admin</option>
-                                  </select>
+                                    Delete
+                                  </button>
                                 </div>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedUserDisabled}
-                                    onChange={(e) => setSelectedUserDisabled(e.target.checked)}
-                                  />
-                                  Disabled
-                                </label>
-                                <button style={styles.button} onClick={handleSaveUserProfile} disabled={userSaving}>
-                                  {userSaving ? 'Saving…' : 'Save User'}
-                                </button>
-                              </div>
+                              ))
                             )}
                           </div>
                         </div>
+                      </div>
 
-                        <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111', marginBottom: '20px' }}>
-                          <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>User Drop Permissions</div>
-                          {!selectedUserId ? (
-                            <div style={styles.tiny}>Select a user to manage permissions.</div>
-                          ) : drops.length === 0 ? (
-                            <div style={styles.tiny}>No drops available.</div>
-                          ) : (
-                            <div style={{ display: 'grid', gap: '10px' }}>
-                              {drops.map((drop) => {
-                                const existing = userPermissions.find((p) => p.drop_id === drop.id);
-                                return (
-                                  <div
-                                    key={drop.id}
-                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', border: '1px solid #222', padding: '8px 10px', borderRadius: '8px' }}
-                                  >
-                                    <div style={{ color: '#fff' }}>{drop.name}</div>
-                                    <div style={{ display: 'flex', gap: '12px' }}>
-                                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
-                                        <input
-                                          type="checkbox"
-                                          checked={Boolean(existing?.can_ingest)}
-                                          onChange={(e) => {
-                                            const canIngest = e.target.checked;
-                                            setUserPermissions((prev) => {
-                                              const rest = prev.filter((p) => p.drop_id !== drop.id);
-                                              return [...rest, { drop_id: drop.id, can_ingest: canIngest ? 1 : 0, can_query: existing?.can_query ?? 0 }];
-                                            });
-                                          }}
-                                        />
-                                        Ingest
-                                      </label>
-                                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
-                                        <input
-                                          type="checkbox"
-                                          checked={Boolean(existing?.can_query)}
-                                          onChange={(e) => {
-                                            const canQuery = e.target.checked;
-                                            setUserPermissions((prev) => {
-                                              const rest = prev.filter((p) => p.drop_id !== drop.id);
-                                              return [...rest, { drop_id: drop.id, can_ingest: existing?.can_ingest ?? 0, can_query: canQuery ? 1 : 0 }];
-                                            });
-                                          }}
-                                        />
-                                        Query
-                                      </label>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                                <button style={styles.button} onClick={handleSaveUserPermissions} disabled={userSaving}>
-                                  {userSaving ? 'Saving…' : 'Save Permissions'}
-                                </button>
-                              </div>
+                      <div style={styles.pane}>
+                        <div style={styles.paneHeader}>
+                          <span style={styles.paneTitle}>API Keys</span>
+                          <span style={styles.tiny}>Scoped to your access</span>
+                        </div>
+                        <div style={styles.paneBody}>
+                          {serviceAccounts.length === 0 ? (
+                            <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                              Create a service account first.
                             </div>
+                          ) : (
+                            <>
+                              <div style={{ display: 'grid', gap: '10px' }}>
+                                <div>
+                                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Service account</div>
+                                  <select
+                                    style={styles.select}
+                                    value={selectedServiceAccountId ?? ''}
+                                    onChange={(e) => setSelectedServiceAccountId(Number(e.target.value))}
+                                    disabled={serviceAccounts.length === 0}
+                                  >
+                                    {serviceAccounts.map((sa) => (
+                                      <option key={sa.id} value={sa.id}>
+                                        {sa.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Scope (drop)</div>
+                                  <select
+                                    style={styles.select}
+                                    value={apiKeyDropId ?? ''}
+                                    onChange={(e) => setApiKeyDropId(Number(e.target.value))}
+                                    disabled={accountDrops.length === 0}
+                                  >
+                                    {accountDrops.map((d) => (
+                                      <option key={d.id} value={d.id}>
+                                        {d.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  {accountDrops.length === 0 && (
+                                    <div style={{ ...styles.tiny, marginTop: '6px' }}>
+                                      No drops assigned. Ask an admin to grant you query and/or ingest access.
+                                    </div>
+                                  )}
+                                  <div style={{ ...styles.tiny, marginTop: '6px' }}>
+                                    This does not change the app's active drop. It only scopes what this key can access.
+                                  </div>
+                                </div>
+                                <div>
+                                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Name (optional)</div>
+                                  <input
+                                    style={styles.filterInput}
+                                    placeholder="e.g., staging-query"
+                                    value={newApiKeyName}
+                                    onChange={(e) => setNewApiKeyName(e.target.value)}
+                                  />
+                                </div>
+
+                                {(() => {
+                                  const d = apiKeyDropId === null ? null : accountDrops.find((x) => x.id === apiKeyDropId) ?? null;
+                                  const canIngest = Boolean(d?.can_ingest) || isAdmin;
+                                  const canQuery = Boolean(d?.can_query) || isAdmin;
+                                  const scopeLabel = apiKeyDropId ? dropLabel(apiKeyDropId) : 'Select a drop';
+                                  return (
+                                    <div style={{ display: 'grid', gap: '8px' }}>
+                                      <div style={{ ...styles.tiny, color: 'rgba(255,255,255,0.55)' }}>
+                                        Permissions for: <span style={styles.mono}>{scopeLabel}</span>
+                                      </div>
+                                      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={apiKeyCanIngest}
+                                          onChange={(e) => setApiKeyCanIngest(e.target.checked)}
+                                          disabled={!canIngest}
+                                        />
+                                        Ingest {!canIngest && <span style={{ color: '#777' }}>(no access)</span>}
+                                      </label>
+                                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={apiKeyCanQuery}
+                                          onChange={(e) => setApiKeyCanQuery(e.target.checked)}
+                                          disabled={!canQuery}
+                                        />
+                                        Query {!canQuery && <span style={{ color: '#777' }}>(no access)</span>}
+                                      </label>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+
+                                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                  <button
+                                    style={styles.button}
+                                    onClick={handleCreateApiKey}
+                                    disabled={!selectedServiceAccountId || !apiKeyDropId || accountDrops.length === 0}
+                                  >
+                                    Create API key
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div style={{ marginTop: '14px', display: 'grid', gap: '8px' }}>
+                                {apiKeys.filter((k) => (selectedServiceAccountId ? k.service_account_id === selectedServiceAccountId : true)).length === 0 ? (
+                                  <div style={styles.tiny}>No API keys yet.</div>
+                                ) : (
+                                  apiKeys
+                                    .filter((k) => (selectedServiceAccountId ? k.service_account_id === selectedServiceAccountId : true))
+                                    .map((key) => (
+                                      <div key={key.id} style={{ border: '1px solid #222', borderRadius: '8px', padding: '8px 10px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                                          <div style={{ color: '#fff', fontWeight: 600 }}>
+                                            {key.name || 'API key'} • {key.key_prefix}…
+                                          </div>
+                                          <div style={styles.tiny}>#{key.id}</div>
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '6px' }}>
+                                          {key.permissions.map((p) => (
+                                            <span key={`${key.id}-${p.drop_id}`} style={{ ...styles.pill, display: 'inline-flex', gap: '8px' }}>
+                                              <span style={{ color: '#e5e7eb' }}>{dropLabel(p.drop_id)}</span>
+                                              <span
+                                                style={{
+                                                  ...styles.mono,
+                                                  padding: '2px 6px',
+                                                  borderRadius: '999px',
+                                                  border: '1px solid rgba(34,197,94,0.35)',
+                                                  background: p.can_ingest ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.04)',
+                                                  color: p.can_ingest ? '#bbf7d0' : 'rgba(255,255,255,0.45)',
+                                                }}
+                                              >
+                                                ingest
+                                              </span>
+                                              <span
+                                                style={{
+                                                  ...styles.mono,
+                                                  padding: '2px 6px',
+                                                  borderRadius: '999px',
+                                                  border: '1px solid rgba(99,102,241,0.35)',
+                                                  background: p.can_query ? 'rgba(99,102,241,0.12)' : 'rgba(255,255,255,0.04)',
+                                                  color: p.can_query ? '#c7d2fe' : 'rgba(255,255,255,0.45)',
+                                                }}
+                                              >
+                                                query
+                                              </span>
+                                            </span>
+                                          ))}
+                                          {key.revoked_at && <span style={{ ...styles.pill, color: '#fca5a5', borderColor: '#7f1d1d' }}>Revoked</span>}
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                                          <div style={styles.tiny}>Created {new Date(key.created_at).toLocaleString()}</div>
+                                          {!key.revoked_at && (
+                                            <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={() => handleRevokeApiKey(key.id)}>
+                                              Revoke
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ))
+                                )}
+                              </div>
+                            </>
                           )}
                         </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
-                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
-                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>Service Accounts</div>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'end' }}>
-                              <div>
-                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>New service account</div>
-                                <input
-                                  style={styles.filterInput}
-                                  placeholder="e.g., api-gateway"
-                                  value={newServiceAccountName}
-                                  onChange={(e) => setNewServiceAccountName(e.target.value)}
-                                  onKeyDown={(e) => e.key === 'Enter' && handleCreateServiceAccount()}
-                                />
-                              </div>
-                              <button style={styles.button} onClick={handleCreateServiceAccount} disabled={!newServiceAccountName.trim()}>
-                                Create
-                              </button>
-                            </div>
-
-                            <div style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
-                              {serviceAccounts.length === 0 ? (
-                                <div style={styles.tiny}>No service accounts yet.</div>
-                              ) : (
-                                serviceAccounts.map((sa) => (
-                                  <div
-                                    key={sa.id}
-                                    style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      justifyContent: 'space-between',
-                                      padding: '8px 10px',
-                                      borderRadius: '8px',
-                                      border: '1px solid #222',
-                                      background: selectedServiceAccountId === sa.id ? '#151515' : '#0f0f0f',
-                                      cursor: 'pointer',
-                                    }}
-                                    onClick={() => setSelectedServiceAccountId(sa.id)}
-                                  >
-                                    <div>
-                                      <div style={{ color: '#fff', fontWeight: 600 }}>{sa.name}</div>
-                                      <div style={styles.tiny}>
-                                        Created by {sa.created_by_email ?? 'unknown'} • {new Date(sa.created_at).toLocaleString()}
-                                      </div>
-                                    </div>
-                                    <span style={styles.tiny}>#{sa.id}</span>
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          </div>
-
-                          <div style={{ border: '1px solid #222', borderRadius: '10px', padding: '12px', background: '#111' }}>
-                            <div style={{ ...styles.metaLabel, marginBottom: '10px' }}>API Keys</div>
-                            <div style={{ display: 'grid', gap: '10px' }}>
-                              <div>
-                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Service account</div>
-                                <select
-                                  style={styles.select}
-                                  value={selectedServiceAccountId ?? ''}
-                                  onChange={(e) => setSelectedServiceAccountId(Number(e.target.value))}
-                                  disabled={serviceAccounts.length === 0}
-                                >
-                                  {serviceAccounts.map((sa) => (
-                                    <option key={sa.id} value={sa.id}>
-                                      {sa.name}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div>
-                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Drop</div>
-                                <select
-                                  style={styles.select}
-                                  value={apiKeyDropId ?? ''}
-                                  onChange={(e) => setApiKeyDropId(Number(e.target.value))}
-                                  disabled={drops.length === 0}
-                                >
-                                  {drops.map((d) => (
-                                    <option key={d.id} value={d.id}>
-                                      {d.name}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div>
-                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Name (optional)</div>
-                                <input
-                                  style={styles.filterInput}
-                                  placeholder="e.g., staging-ingest"
-                                  value={newApiKeyName}
-                                  onChange={(e) => setNewApiKeyName(e.target.value)}
-                                />
-                              </div>
-                              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={apiKeyCanIngest}
-                                    onChange={(e) => setApiKeyCanIngest(e.target.checked)}
-                                  />
-                                  Ingest
-                                </label>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={apiKeyCanQuery}
-                                    onChange={(e) => setApiKeyCanQuery(e.target.checked)}
-                                  />
-                                  Query
-                                </label>
-                              </div>
-                              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                                <button style={styles.button} onClick={handleCreateApiKey} disabled={!selectedServiceAccountId || !apiKeyDropId}>
-                                  Create API key
-                                </button>
-                              </div>
-                            </div>
-
-                            <div style={{ marginTop: '14px', display: 'grid', gap: '8px' }}>
-                              {apiKeys.length === 0 ? (
-                                <div style={styles.tiny}>No API keys yet.</div>
-                              ) : (
-                                apiKeys.map((key) => (
-                                  <div key={key.id} style={{ border: '1px solid #222', borderRadius: '8px', padding: '8px 10px' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                                      <div style={{ color: '#fff', fontWeight: 600 }}>
-                                        {key.name || 'API key'} • {key.key_prefix}…
-                                      </div>
-                                      <div style={styles.tiny}>#{key.id}</div>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '6px' }}>
-                                      {key.permissions.map((p) => (
-                                        <span key={`${key.id}-${p.drop_id}`} style={styles.pill}>
-                                          Drop #{p.drop_id}: {p.can_ingest ? 'ingest' : ''}{p.can_ingest && p.can_query ? ', ' : ''}{p.can_query ? 'query' : ''}
-                                        </span>
-                                      ))}
-                                      {key.revoked_at && <span style={{ ...styles.pill, color: '#fca5a5', borderColor: '#7f1d1d' }}>Revoked</span>}
-                                    </div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                                      <div style={styles.tiny}>Created {new Date(key.created_at).toLocaleString()}</div>
-                                      {!key.revoked_at && (
-                                        <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={() => handleRevokeApiKey(key.id)}>
-                                          Revoke
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
-              {(!authActive || isAdmin) && (
-                <div style={{ ...styles.pane, gridColumn: '1 / -1' }}>
-                  <div style={styles.paneHeader}>
-                    <span style={styles.paneTitle}>Integrations</span>
-                    <span style={styles.tiny}>Optional</span>
-                  </div>
-                  <div style={styles.paneBody}>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
-                      <div>
-                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6, marginBottom: '10px' }}>
-                          Configure OpenRouter for AI dashboard generation. Values are stored locally (API key is encrypted at rest).
-                        </div>
-                        <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Model</div>
-                        <input
-                          style={styles.filterInput}
-                          placeholder="openai/gpt-4o-mini"
-                          value={openRouterModel}
-                          onChange={(e) => setOpenRouterModel(e.target.value)}
-                        />
-                        <div style={{ ...styles.metaLabel, marginTop: '12px', marginBottom: '6px' }}>API key</div>
-                        <input
-                          style={styles.filterInput}
-                          type="password"
-                          placeholder={openRouterApiKeySet ? '•••••••• (set)' : 'Paste OPENROUTER_API_KEY'}
-                          value={openRouterApiKey}
-                          onChange={(e) => setOpenRouterApiKey(e.target.value)}
-                        />
-                        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
-                          {openRouterApiKeySet && (
-                            <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={clearOpenRouterKey} disabled={openRouterSaving}>
-                              Clear key
-                            </button>
-                          )}
-                          <button style={styles.button} onClick={saveOpenRouterSettings} disabled={openRouterSaving}>
-                            {openRouterSaving ? 'Saving…' : 'Save'}
-                          </button>
-                        </div>
+              {settingsTab === 'users' && (
+                <div style={{ display: 'grid', gap: '16px' }}>
+                  {authActive && !isAdmin ? (
+                    <div style={styles.pane}>
+                      <div style={styles.paneHeader}>
+                        <span style={styles.paneTitle}>Users</span>
+                        <span style={styles.tiny}>Admin only</span>
                       </div>
-
-                      <div>
-                        <div style={styles.pill}>
-                          Status:
-                          <span style={{ color: '#fff' }}>{openRouterApiKeySet ? 'API key set' : 'No API key'}</span>
-                        </div>
-                        <div style={{ marginTop: '12px', color: '#888', fontSize: '13px', lineHeight: 1.6 }}>
-                          Notes:
-                          <ul style={{ marginTop: '8px', paddingLeft: '18px', color: '#aaa' }}>
-                            <li>Key is never returned to the browser once saved.</li>
-                            <li>You can still override via server env vars if you want.</li>
-                          </ul>
+                      <div style={styles.paneBody}>
+                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                          Only admins can manage users.
                         </div>
                       </div>
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                        <div style={styles.pane}>
+                          <div style={styles.paneHeader}>
+                            <span style={styles.paneTitle}>Users</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <span style={styles.tiny}>Admin</span>
+                              {authActive && isAdmin && authMode === 'password_only' && (
+                                <button style={{ ...styles.button, padding: '6px 10px' }} onClick={openAddUserModal}>
+                                  Add user
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <div style={styles.paneBody}>
+                            {authActive && isAdmin && authMode === 'password_only' && (
+                              <div style={{ color: '#888', fontSize: '12px', lineHeight: 1.6, marginBottom: '10px' }}>
+                                Password-only mode has no self-service sign-up. Admins create users.
+                              </div>
+                            )}
+                            <div role="listbox" aria-label="Users" style={{ display: 'grid', gap: '8px' }}>
+                              {users.length === 0 ? (
+                                <div style={styles.tiny}>No users yet.</div>
+                              ) : (
+                                users.map((user, idx) => {
+                                  const selected = selectedUserId === user.user_id;
+                                  const tabIndex = selected ? 0 : -1;
+                                  return (
+                                    <div
+                                      key={user.user_id}
+                                      role="option"
+                                      aria-selected={selected}
+                                      tabIndex={tabIndex}
+                                      style={{
+                                        position: 'relative',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        padding: '9px 10px 9px 12px',
+                                        borderRadius: '10px',
+                                        border: selected ? '1px solid rgba(99,102,241,0.65)' : '1px solid #222',
+                                        background: selected ? 'rgba(99,102,241,0.10)' : '#0f0f0f',
+                                        boxShadow: selected ? '0 0 0 3px rgba(99,102,241,0.14)' : undefined,
+                                        cursor: 'pointer',
+                                        outline: 'none',
+                                      }}
+                                      onClick={() => setSelectedUserId(user.user_id)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                          e.preventDefault();
+                                          setSelectedUserId(user.user_id);
+                                          return;
+                                        }
+                                        if (e.key === 'ArrowDown') {
+                                          e.preventDefault();
+                                          const next = users[Math.min(idx + 1, users.length - 1)];
+                                          if (next) setSelectedUserId(next.user_id);
+                                          return;
+                                        }
+                                        if (e.key === 'ArrowUp') {
+                                          e.preventDefault();
+                                          const prev = users[Math.max(idx - 1, 0)];
+                                          if (prev) setSelectedUserId(prev.user_id);
+                                        }
+                                      }}
+                                      title="Select user"
+                                    >
+                                      <div
+                                        aria-hidden="true"
+                                        style={{
+                                          position: 'absolute',
+                                          left: 0,
+                                          top: 0,
+                                          bottom: 0,
+                                          width: '3px',
+                                          background: selected
+                                            ? 'linear-gradient(180deg, rgba(99,102,241,0.9), rgba(34,197,94,0.65))'
+                                            : 'transparent',
+                                        }}
+                                      />
+                                      <div style={{ minWidth: 0 }}>
+                                        <div style={{ color: '#fff', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                          {user.email}{' '}
+                                          {user.protected_admin && <span style={{ ...styles.pill, marginLeft: '8px' }}>Protected admin</span>}
+                                        </div>
+                                        <div style={styles.tiny}>
+                                          {user.role} • {user.disabled ? 'disabled' : 'active'}
+                                        </div>
+                                      </div>
+                                      <span style={styles.tiny}>#{user.user_id.slice(0, 6)}</span>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={styles.pane}>
+                          <div style={styles.paneHeader}>
+                            <span style={styles.paneTitle}>Selected User</span>
+                            <span style={styles.tiny}>Profile</span>
+                          </div>
+                          <div style={styles.paneBody}>
+                            {!selectedUserId ? (
+                              <div style={styles.tiny}>Select a user to edit.</div>
+                            ) : (
+                              (() => {
+                                const selectedUser = users.find((u) => u.user_id === selectedUserId) ?? null;
+                                const isProtected = Boolean(selectedUser?.protected_admin);
+                                return (
+                                  <div style={{ display: 'grid', gap: '10px' }}>
+                                    <div>
+                                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Role</div>
+                                      <select
+                                        style={styles.select}
+                                        value={selectedUserRole}
+                                        onChange={(e) => setSelectedUserRole(e.target.value === 'admin' ? 'admin' : 'member')}
+                                        disabled={isProtected}
+                                      >
+                                        <option value="member">Member</option>
+                                        <option value="admin">Admin</option>
+                                      </select>
+                                      {isProtected && (
+                                        <div style={{ ...styles.tiny, marginTop: '6px' }}>
+                                          This account is protected by <span style={styles.mono}>RAPHAEL_ADMIN_EMAIL</span>.
+                                        </div>
+                                      )}
+                                    </div>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#ccc' }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedUserDisabled}
+                                        onChange={(e) => setSelectedUserDisabled(e.target.checked)}
+                                        disabled={isProtected}
+                                      />
+                                      Disabled
+                                    </label>
+                                    <button style={styles.button} onClick={handleSaveUserProfile} disabled={userSaving}>
+                                      {userSaving ? 'Saving…' : 'Save User'}
+                                    </button>
+                                  </div>
+                                );
+                              })()
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {(!authActive || isAdmin) && (
+                    <div style={styles.pane}>
+                      <div style={styles.paneHeader}>
+                        <span style={styles.paneTitle}>User Drop Permissions</span>
+                        <span style={styles.tiny}>Admin</span>
+                      </div>
+                      <div style={styles.paneBody}>
+                        {!selectedUserId ? (
+                          <div style={styles.tiny}>Select a user to manage permissions.</div>
+                        ) : drops.length === 0 ? (
+                          <div style={styles.tiny}>No drops available.</div>
+                        ) : (
+                          <div style={{ display: 'grid', gap: '10px' }}>
+                            {drops.map((drop) => {
+                              const existing = userPermissions.find((p) => p.drop_id === drop.id);
+                              return (
+                                <div
+                                  key={drop.id}
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    border: '1px solid #222',
+                                    padding: '8px 10px',
+                                    borderRadius: '8px',
+                                  }}
+                                >
+                                  <div style={{ color: '#fff' }}>{drop.name}</div>
+                                  <div style={{ display: 'flex', gap: '12px' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={Boolean(existing?.can_ingest)}
+                                        onChange={(e) => {
+                                          const canIngest = e.target.checked;
+                                          setUserPermissions((prev) => {
+                                            const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                            return [...rest, { drop_id: drop.id, can_ingest: canIngest ? 1 : 0, can_query: existing?.can_query ?? 0 }];
+                                          });
+                                        }}
+                                      />
+                                      Ingest
+                                    </label>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={Boolean(existing?.can_query)}
+                                        onChange={(e) => {
+                                          const canQuery = e.target.checked;
+                                          setUserPermissions((prev) => {
+                                            const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                            return [...rest, { drop_id: drop.id, can_ingest: existing?.can_ingest ?? 0, can_query: canQuery ? 1 : 0 }];
+                                          });
+                                        }}
+                                      />
+                                      Query
+                                    </label>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                              <button style={styles.button} onClick={handleSaveUserPermissions} disabled={userSaving}>
+                                {userSaving ? 'Saving…' : 'Save Permissions'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
+
+              {settingsTab === 'auth' && (
+                <div style={{ display: 'grid', gap: '16px' }}>
+                  {authActive && !isAdmin ? (
+                    <div style={styles.pane}>
+                      <div style={styles.paneHeader}>
+                        <span style={styles.paneTitle}>Auth</span>
+                        <span style={styles.tiny}>Admin only</span>
+                      </div>
+                      <div style={styles.paneBody}>
+                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                          Only admins can manage auth policy.
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={styles.pane}>
+                        <div style={styles.paneHeader}>
+                          <span style={styles.paneTitle}>Auth</span>
+                          <span style={styles.tiny}>Providers and policy</span>
+                        </div>
+                        <div style={styles.paneBody}>
+                          <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                            Providers appear automatically based on server env vars. OAuth allowlist is enforced only when email/password is disabled.
+                          </div>
+                          <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
+                            <div style={styles.pill}>
+                              Mode:
+                              <span style={{ color: '#fff' }}>{authMode}</span>
+                            </div>
+                            <div style={styles.pill}>
+                              Providers:
+                              <span style={{ color: '#fff' }}>
+                                {authProviders.length === 0 ? 'none' : authProviders.map((p) => p.label).join(', ')}
+                              </span>
+                            </div>
+                            <div style={styles.pill}>
+                              Email/password:
+                              <span style={{ color: '#fff' }}>{authEmailPasswordEnabled ? 'enabled' : 'disabled'}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={styles.pane}>
+                        <div style={styles.paneHeader}>
+                          <span style={styles.paneTitle}>OAuth Allowlist</span>
+                          <span style={styles.tiny}>OAuth-only mode</span>
+                        </div>
+                        <div style={styles.paneBody}>
+                          {authMode !== 'oauth_only' ? (
+                            <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                              Allowlist is only enforced in <span style={styles.mono}>oauth_only</span> mode. Disable email/password login to enable enforcement.
+                            </div>
+                          ) : (
+                            <>
+                              <div style={{ color: '#888', fontSize: '13px', lineHeight: 1.6, marginBottom: '12px' }}>
+                                Policy is <b>OR</b>: allow if email matches or domain matches. If both lists are empty, all OAuth users are allowed. <span style={styles.mono}>RAPHAEL_ADMIN_EMAIL</span> is always allowed.
+                              </div>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', alignItems: 'start' }}>
+                                <div>
+                                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Allowed domains</div>
+                                  <textarea
+                                    style={{ ...styles.filterInput, height: '120px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
+                                    value={authPolicyDomains}
+                                    onChange={(e) => setAuthPolicyDomains(e.target.value)}
+                                    placeholder="example.com\nmycompany.com"
+                                  />
+                                </div>
+                                <div>
+                                  <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Allowed emails</div>
+                                  <textarea
+                                    style={{ ...styles.filterInput, height: '120px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
+                                    value={authPolicyEmails}
+                                    onChange={(e) => setAuthPolicyEmails(e.target.value)}
+                                    placeholder="alice@example.com\nbob@mycompany.com"
+                                  />
+                                </div>
+                              </div>
+                              <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
+                                <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Default permissions</div>
+                                <div style={{ color: '#888', fontSize: '13px', lineHeight: 1.6, marginBottom: '10px' }}>
+                                  Applied on first sign-in for allowed OAuth users that do not have any drop permissions yet.
+                                </div>
+                                {drops.length === 0 ? (
+                                  <div style={styles.tiny}>No drops available.</div>
+                                ) : (
+                                  <div style={{ display: 'grid', gap: '10px' }}>
+                                    {drops.map((drop) => {
+                                      const existing = authPolicyDefaultPermissions.find((p) => p.drop_id === drop.id);
+                                      return (
+                                        <div
+                                          key={drop.id}
+                                          style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            border: '1px solid #222',
+                                            padding: '8px 10px',
+                                            borderRadius: '8px',
+                                          }}
+                                        >
+                                          <div style={{ color: '#fff' }}>{drop.name}</div>
+                                          <div style={{ display: 'flex', gap: '12px' }}>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                              <input
+                                                type="checkbox"
+                                                checked={Boolean(existing?.can_ingest)}
+                                                onChange={(e) => {
+                                                  const canIngest = e.target.checked;
+                                                  setAuthPolicyDefaultPermissions((prev) => {
+                                                    const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                                    const next = { drop_id: drop.id, can_ingest: canIngest, can_query: Boolean(existing?.can_query) };
+                                                    if (!next.can_ingest && !next.can_query) return rest;
+                                                    return [...rest, next];
+                                                  });
+                                                }}
+                                              />
+                                              Ingest
+                                            </label>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                              <input
+                                                type="checkbox"
+                                                checked={Boolean(existing?.can_query)}
+                                                onChange={(e) => {
+                                                  const canQuery = e.target.checked;
+                                                  setAuthPolicyDefaultPermissions((prev) => {
+                                                    const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                                    const next = { drop_id: drop.id, can_ingest: Boolean(existing?.can_ingest), can_query: canQuery };
+                                                    if (!next.can_ingest && !next.can_query) return rest;
+                                                    return [...rest, next];
+                                                  });
+                                                }}
+                                              />
+                                              Query
+                                            </label>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                              {authPolicyError && (
+                                <div style={{ marginTop: '10px', color: '#fecaca', fontSize: '12px' }}>
+                                  {authPolicyError}
+                                </div>
+                              )}
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px', gap: '10px' }}>
+                                <button style={styles.button} onClick={fetchAuthPolicy} disabled={authPolicySaving}>
+                                  Refresh
+                                </button>
+                                <button style={styles.button} onClick={saveAuthPolicy} disabled={authPolicySaving}>
+                                  {authPolicySaving ? 'Saving…' : 'Save'}
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {settingsTab === 'integrations' && (
+                <div style={{ display: 'grid', gap: '16px' }}>
+                  {authActive && !isAdmin ? (
+                    <div style={styles.pane}>
+                      <div style={styles.paneHeader}>
+                        <span style={styles.paneTitle}>Integrations</span>
+                        <span style={styles.tiny}>Admin only</span>
+                      </div>
+                      <div style={styles.paneBody}>
+                        <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                          Only admins can configure integrations.
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={styles.pane}>
+                      <div style={styles.paneHeader}>
+                        <span style={styles.paneTitle}>Integrations</span>
+                        <span style={styles.tiny}>Optional</span>
+                      </div>
+                      <div style={styles.paneBody}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
+                          <div>
+                            <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6, marginBottom: '10px' }}>
+                              Configure OpenRouter for AI dashboard generation. Values are stored locally (API key is encrypted at rest).
+                            </div>
+                            <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Model</div>
+                            <input
+                              style={styles.filterInput}
+                              placeholder="openai/gpt-4o-mini"
+                              value={openRouterModel}
+                              onChange={(e) => setOpenRouterModel(e.target.value)}
+                            />
+                            <div style={{ ...styles.metaLabel, marginTop: '12px', marginBottom: '6px' }}>API key</div>
+                            <input
+                              style={styles.filterInput}
+                              type="password"
+                              placeholder={openRouterApiKeySet ? '•••••••• (set)' : 'Paste OPENROUTER_API_KEY'}
+                              value={openRouterApiKey}
+                              onChange={(e) => setOpenRouterApiKey(e.target.value)}
+                            />
+                            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
+                              {openRouterApiKeySet && (
+                                <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={clearOpenRouterKey} disabled={openRouterSaving}>
+                                  Clear key
+                                </button>
+                              )}
+                              <button style={styles.button} onClick={saveOpenRouterSettings} disabled={openRouterSaving}>
+                                {openRouterSaving ? 'Saving…' : 'Save'}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
+                            <div style={styles.pill}>
+                              Status:
+                              <span style={{ color: '#fff' }}>{openRouterApiKeySet ? 'API key set' : 'No API key'}</span>
+                            </div>
+                            <div style={{ marginTop: '12px', color: '#888', fontSize: '13px', lineHeight: 1.6 }}>
+                              Notes:
+                              <ul style={{ marginTop: '8px', paddingLeft: '18px', color: '#aaa' }}>
+                                <li>Key is never returned to the browser once saved.</li>
+                                <li>You can still override via server env vars if you want.</li>
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : dataLocked ? (
+            <div style={{ ...styles.empty, textAlign: 'left' as const, maxWidth: '760px' }}>
+              <div style={{ color: '#fff', fontWeight: 800, marginBottom: '8px' }}>You do not have permissions to view this resource</div>
+              <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.6 }}>
+                This account does not have <span style={styles.mono}>query</span> access to any drop, so telemetry views are disabled.
+                Ask an admin to grant query permissions in <span style={styles.mono}>Settings → Users</span>.
+              </div>
+              <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
+                <button
+                  style={styles.button}
+                  onClick={() => {
+                    setTab('settings');
+                    setSettingsTab('account');
+                  }}
+                >
+                  Open Settings
+                </button>
+              </div>
             </div>
           ) : tab === 'events' ? (
             events.length === 0 ? (
@@ -4382,6 +5523,210 @@ export default function App() {
                   Done
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAddUserModal && (
+        <div style={styles.modal} onClick={closeAddUserModal}>
+          <div style={styles.modalSmallContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>Add User</span>
+              <div style={styles.modalActions}>
+                <button style={styles.button} onClick={closeAddUserModal} disabled={newUserCreating}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div style={styles.modalBody}>
+              {createdUserCreds ? (
+                <>
+                  <div style={{ color: '#888', fontSize: '13px', marginBottom: '10px' }}>
+                    User created. Share these credentials with the user.
+                  </div>
+                  <div style={{ display: 'grid', gap: '10px' }}>
+                    <div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Email</div>
+                      <div style={{ ...styles.metaValue, background: '#0f0f0f', border: '1px solid #222', borderRadius: '8px', padding: '10px' }}>
+                        {createdUserCreds.email}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Password</div>
+                      <div style={{ ...styles.metaValue, background: '#0f0f0f', border: '1px solid #222', borderRadius: '8px', padding: '10px' }}>
+                        {createdUserCreds.password}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                      <button
+                        style={styles.button}
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${createdUserCreds.email}\n${createdUserCreds.password}`);
+                          setAppToast('Credentials copied');
+                        }}
+                      >
+                        Copy credentials
+                      </button>
+                      <button
+                        style={styles.button}
+                        onClick={() => {
+                          setCreatedUserCreds(null);
+                          setNewUserEmail('');
+                          setNewUserPassword('');
+                          setNewUserRole('member');
+                          const defaultDropId = dropId ?? drops[0]?.id ?? null;
+                          setNewUserPermissions(defaultDropId ? [{ drop_id: defaultDropId, can_ingest: false, can_query: true }] : []);
+                        }}
+                      >
+                        Create another
+                      </button>
+                      <button style={styles.button} onClick={closeAddUserModal}>
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ color: '#888', fontSize: '13px', lineHeight: 1.6, marginBottom: '12px' }}>
+                    In <span style={styles.mono}>password_only</span> mode there is no self-service sign-up. Admins must create users.
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', alignItems: 'end' }}>
+                    <div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Email</div>
+                      <input
+                        style={styles.filterInput}
+                        placeholder="user@company.com"
+                        value={newUserEmail}
+                        onChange={(e) => setNewUserEmail(e.target.value)}
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div>
+                      <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Role</div>
+                      <select
+                        style={styles.select}
+                        value={newUserRole}
+                        onChange={(e) => setNewUserRole(e.target.value === 'admin' ? 'admin' : 'member')}
+                      >
+                        <option value="member">Member</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </div>
+                    <div style={{ gridColumn: '1 / -1' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                        <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Password</div>
+                        <button style={{ ...styles.button, padding: '6px 10px' }} onClick={generatePassword} type="button">
+                          Generate
+                        </button>
+                      </div>
+                      <input
+                        style={styles.filterInput}
+                        type="text"
+                        placeholder="Set an initial password"
+                        value={newUserPassword}
+                        onChange={(e) => setNewUserPassword(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <div style={{ ...styles.tiny, marginTop: '6px' }}>
+                        The password is never stored in Raphael. This is only used to create the credential in BetterAuth.
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
+                    <div style={{ ...styles.metaLabel, marginBottom: '6px' }}>Initial permissions</div>
+                    <div style={{ color: '#888', fontSize: '13px', lineHeight: 1.6, marginBottom: '10px' }}>
+                      Assign at least one drop permission. <b>Query</b> is required to view Events, Traces, and Dashboards.
+                    </div>
+                    {drops.length === 0 ? (
+                      <div style={styles.tiny}>No drops available.</div>
+                    ) : (
+                      <div style={{ display: 'grid', gap: '10px' }}>
+                        {drops.map((drop) => {
+                          const existing = newUserPermissions.find((p) => p.drop_id === drop.id);
+                          return (
+                            <div
+                              key={drop.id}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                border: '1px solid #222',
+                                padding: '8px 10px',
+                                borderRadius: '8px',
+                              }}
+                            >
+                              <div style={{ color: '#fff' }}>{drop.name}</div>
+                              <div style={{ display: 'flex', gap: '12px' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(existing?.can_ingest)}
+                                    onChange={(e) => {
+                                      const canIngest = e.target.checked;
+                                      setNewUserPermissions((prev) => {
+                                        const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                        const next = { drop_id: drop.id, can_ingest: canIngest, can_query: Boolean(existing?.can_query) };
+                                        if (!next.can_ingest && !next.can_query) return rest;
+                                        return [...rest, next];
+                                      });
+                                    }}
+                                  />
+                                  Ingest
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#ccc' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(existing?.can_query)}
+                                    onChange={(e) => {
+                                      const canQuery = e.target.checked;
+                                      setNewUserPermissions((prev) => {
+                                        const rest = prev.filter((p) => p.drop_id !== drop.id);
+                                        const next = { drop_id: drop.id, can_ingest: Boolean(existing?.can_ingest), can_query: canQuery };
+                                        if (!next.can_ingest && !next.can_query) return rest;
+                                        return [...rest, next];
+                                      });
+                                    }}
+                                  />
+                                  Query
+                                </label>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {newUserRole !== 'admin' &&
+                      newUserPermissions.filter((p) => p.can_ingest || p.can_query).length === 0 && (
+                        <div style={{ marginTop: '10px', color: '#fecaca', fontSize: '12px' }}>
+                          Member users must be created with at least one permission.
+                        </div>
+                      )}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
+                    <button style={styles.button} onClick={closeAddUserModal} disabled={newUserCreating}>
+                      Cancel
+                    </button>
+                    <button
+                      style={styles.button}
+                      onClick={handleCreateUser}
+                      disabled={
+                        newUserCreating ||
+                        !newUserEmail.trim() ||
+                        !newUserPassword.trim() ||
+                        (newUserRole !== 'admin' && newUserPermissions.filter((p) => p.can_ingest || p.can_query).length === 0)
+                      }
+                    >
+                      {newUserCreating ? 'Creating…' : 'Create user'}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>
