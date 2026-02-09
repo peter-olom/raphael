@@ -13,6 +13,28 @@ A lightweight, local trace and wide event viewer for debugging distributed syste
 - **SQLite Storage** - Persistent, lightweight, no external dependencies
 - **Search** - Query traces and events by service, operation, user, or attributes
 
+## Screenshots
+
+### Wide Events
+
+![Wide Events](screenshots/wide-events.png)
+
+### Trace Drilldown
+
+![Trace Detail](screenshots/trace-detail.png)
+
+### Wide Event Detail
+
+![Wide Event Detail](screenshots/wide-event-detail.png)
+
+### Dashboards
+
+![Dashboards](screenshots/dashboards.png)
+
+### GitHub OAuth Sign-In (Optional)
+
+![GitHub OAuth Sign-In](screenshots/auth-github.png)
+
 ## Quick Start
 
 ### Using Docker (Recommended)
