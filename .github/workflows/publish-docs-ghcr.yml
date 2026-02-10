@@ -63,3 +63,39 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  deploy:
+    name: Deploy Docs (SSH)
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    environment: docs-production
+    permissions:
+      contents: read
+    steps:
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DOCS_DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "${{ secrets.DOCS_DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -p "${{ vars.DOCS_DEPLOY_PORT }}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "${{ vars.DOCS_DEPLOY_USER }}@${{ vars.DOCS_DEPLOY_HOST }}" deploy
+
+      - name: Verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -p "${{ vars.DOCS_DEPLOY_PORT }}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "${{ vars.DOCS_DEPLOY_USER }}@${{ vars.DOCS_DEPLOY_HOST }}" status
