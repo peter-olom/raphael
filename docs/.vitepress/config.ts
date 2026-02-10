@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress';
 
-const githubRepo = process.env.GITHUB_REPOSITORY ?? 'ptr/raphael';
 const maintainer = 'Peter Olom';
+const githubUrl = 'https://github.com/peter-olom/raphael';
 
 export default defineConfig({
   title: 'Raphael',
@@ -42,8 +42,7 @@ export default defineConfig({
         items: [{ text: 'Hosting', link: '/hosting' }]
       }
     ],
-    socialLinks: [{ icon: 'github', link: `https://github.com/${githubRepo}` }]
-    ,
+    socialLinks: [{ icon: 'github', link: githubUrl }],
     footer: {
       message: `MIT Licensed. Built & Maintained by ${maintainer}.`
     }

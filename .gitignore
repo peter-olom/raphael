@@ -8,3 +8,6 @@ data/
 .env
 .env.*
 !.env.example
+
+# Local-only operational notes and artifacts.
+.local/
