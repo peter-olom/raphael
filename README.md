@@ -1,4 +1,7 @@
-# Raphael
+<h1>
+  <img src="src/client/public/raphael-icon-64.png" alt="Raphael" width="36" />
+  Raphael
+</h1>
 
 **The Watcher Who Heals**
 
@@ -25,25 +28,46 @@ Raphael is intentionally straight to the point:
 
 ## Screenshots
 
-### Wide Events
+<table>
+  <tr>
+    <td><b>Wide Events</b></td>
+    <td><b>Wide Event Detail</b></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/wide-events.png" alt="Wide Events" width="460" /></td>
+    <td><img src="screenshots/wide-event-detail.png" alt="Wide Event Detail" width="460" /></td>
+  </tr>
+  <tr>
+    <td><b>Trace Drilldown</b></td>
+    <td><b>Dashboards</b></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/trace-detail.png" alt="Trace Drilldown" width="460" /></td>
+    <td><img src="screenshots/dashboards.png" alt="Dashboards" width="460" /></td>
+  </tr>
+  <tr>
+    <td><b>GitHub OAuth Sign-In (Optional)</b></td>
+    <td></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/auth-github.png" alt="GitHub OAuth Sign-In" width="460" /></td>
+    <td></td>
+  </tr>
+</table>
 
-![Wide Events](screenshots/wide-events.png)
+## Documentation Website
 
-### Trace Drilldown
+This repo includes a Markdown-based docs site under `docs/` (VitePress), designed to stay dark and match the app's vibe.
 
-![Trace Drilldown](screenshots/trace-detail.png)
+The docs site can also be built and published as its own container image (GHCR). See `Dockerfile.docs`.
 
-### Wide Event Detail
+Run the docs site locally:
 
-![Wide Event Detail](screenshots/wide-event-detail.png)
+```bash
+docker compose -f docker-compose.docs.yml up --build
+```
 
-### Dashboards
-
-![Dashboards](screenshots/dashboards.png)
-
-### GitHub OAuth Sign-In (Optional)
-
-![GitHub OAuth Sign-In](screenshots/auth-github.png)
+Then open `http://localhost:8080`.
 
 ## Quick Start
 
@@ -64,14 +88,14 @@ npm run dev
 
 ## Endpoints
 
-| Endpoint | Method | Format | Description |
-|----------|--------|--------|-------------|
-| `/v1/traces` | POST | OTLP JSON | Ingest OpenTelemetry traces |
-| `/v1/events` | POST | JSON | Ingest wide events (simple format) |
-| `/v1/logs` | POST | OTLP JSON | Ingest wide events (OTLP logs format) |
-| `/v1/query/traces` | POST | JSON | Query traces (rich filters) |
-| `/v1/query/events` | POST | JSON | Query wide events (rich filters) |
-| `/v1/query/traces/:traceId` | GET | JSON | Get all spans and events for a trace |
+| Endpoint                    | Method | Format    | Description                           |
+| --------------------------- | ------ | --------- | ------------------------------------- |
+| `/v1/traces`                | POST   | OTLP JSON | Ingest OpenTelemetry traces           |
+| `/v1/events`                | POST   | JSON      | Ingest wide events (simple format)    |
+| `/v1/logs`                  | POST   | OTLP JSON | Ingest wide events (OTLP logs format) |
+| `/v1/query/traces`          | POST   | JSON      | Query traces (rich filters)           |
+| `/v1/query/events`          | POST   | JSON      | Query wide events (rich filters)      |
+| `/v1/query/traces/:traceId` | GET    | JSON      | Get all spans and events for a trace  |
 
 ### Sending Traces (OTLP Format)
 
@@ -116,55 +140,55 @@ curl -X POST http://localhost:6274/v1/events \
 
 ## API
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/traces` | GET | List recent traces |
-| `/api/events` | GET | List recent wide events |
-| `/api/traces/:traceId` | GET | Get all spans and events for a trace |
-| `/api/search/traces?q=` | GET | Search traces |
-| `/api/search/events?q=` | GET | Search wide events |
-| `/api/stats` | GET | Get counts for traces, events, and errors |
-| `/api/clear` | DELETE | Clear all data (admin only when auth is enabled) |
-| `/api/drops` | GET | List drops (when auth is enabled, only drops you can query) |
-| `/api/drops` | POST | Create a drop (admin only when auth is enabled) |
-| `/api/drops/:dropId/retention` | PUT | Update per-drop retention (admin only when auth is enabled) |
-| `/api/drops/:dropId/label` | PUT | Update a drop label (admin only when auth is enabled) |
-| `/api/drops/:dropId` | DELETE | Delete a drop and all its data (admin only when auth is enabled) |
-| `/api/auth/config` | GET | Auth configuration summary for the UI |
-| `/api/auth/*` | POST/GET | BetterAuth endpoints (sign-in, callbacks, sessions) |
-| `/api/admin/*` | GET/POST/PATCH/DELETE | Admin endpoints (users, per-user drop permissions, OAuth allowlist policy; only meaningful when auth is enabled) |
-| `/api/account/*` | GET/POST/DELETE | Account endpoints (mine-only service accounts, API keys, usage; session required; only available when auth is enabled) |
+| Endpoint                       | Method                | Description                                                                                                            |
+| ------------------------------ | --------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `/api/traces`                  | GET                   | List recent traces                                                                                                     |
+| `/api/events`                  | GET                   | List recent wide events                                                                                                |
+| `/api/traces/:traceId`         | GET                   | Get all spans and events for a trace                                                                                   |
+| `/api/search/traces?q=`        | GET                   | Search traces                                                                                                          |
+| `/api/search/events?q=`        | GET                   | Search wide events                                                                                                     |
+| `/api/stats`                   | GET                   | Get counts for traces, events, and errors                                                                              |
+| `/api/clear`                   | DELETE                | Clear all data (admin only when auth is enabled)                                                                       |
+| `/api/drops`                   | GET                   | List drops (when auth is enabled, only drops you can query)                                                            |
+| `/api/drops`                   | POST                  | Create a drop (admin only when auth is enabled)                                                                        |
+| `/api/drops/:dropId/retention` | PUT                   | Update per-drop retention (admin only when auth is enabled)                                                            |
+| `/api/drops/:dropId/label`     | PUT                   | Update a drop label (admin only when auth is enabled)                                                                  |
+| `/api/drops/:dropId`           | DELETE                | Delete a drop and all its data (admin only when auth is enabled)                                                       |
+| `/api/auth/config`             | GET                   | Auth configuration summary for the UI                                                                                  |
+| `/api/auth/*`                  | POST/GET              | BetterAuth endpoints (sign-in, callbacks, sessions)                                                                    |
+| `/api/admin/*`                 | GET/POST/PATCH/DELETE | Admin endpoints (users, per-user drop permissions, OAuth allowlist policy; only meaningful when auth is enabled)       |
+| `/api/account/*`               | GET/POST/DELETE       | Account endpoints (mine-only service accounts, API keys, usage; session required; only available when auth is enabled) |
 
 ## Configuration
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `PORT` | `6274` | Server port |
-| `RAPHAEL_DB_PATH` | `./data/raphael.db` | SQLite database path |
-| `RAPHAEL_AUTH_ENABLED` | `false` | Enable auth (sessions + API keys) |
-| `RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED` | `false` | Enable email/password login |
-| `RAPHAEL_ADMIN_EMAIL` | `""` | Promote this email to admin on sign-in |
-| `RAPHAEL_ADMIN_PASSWORD` | `""` | Seed/update admin password (email/password only) |
-| `RAPHAEL_AUTH_SESSION_TTL_HOURS` | `168` | Session duration in hours |
-| `RAPHAEL_AUTH_TRUSTED_ORIGINS` | `""` | Comma-separated trusted origins for auth |
-| `RAPHAEL_AUTH_GOOGLE_CLIENT_ID` | `""` | Google OAuth client id |
-| `RAPHAEL_AUTH_GOOGLE_CLIENT_SECRET` | `""` | Google OAuth client secret |
-| `RAPHAEL_AUTH_GITHUB_CLIENT_ID` | `""` | GitHub OAuth client id |
-| `RAPHAEL_AUTH_GITHUB_CLIENT_SECRET` | `""` | GitHub OAuth client secret |
-| `RAPHAEL_AUTH_AZURE_TENANT_ID` | `""` | Azure Entra tenant id |
-| `RAPHAEL_AUTH_AZURE_CLIENT_ID` | `""` | Azure Entra client id |
-| `RAPHAEL_AUTH_AZURE_CLIENT_SECRET` | `""` | Azure Entra client secret |
-| `RAPHAEL_AUTH_GENERIC_OAUTH` | `""` | JSON array of generic OAuth providers |
-| `BETTER_AUTH_SECRET` | `""` | Required in production, 32+ chars |
-| `BETTER_AUTH_BASE_URL` | `""` | Base URL for OAuth callbacks and redirects (recommended) |
-| `BETTER_AUTH_URL` | `""` | Legacy base URL env var (fallback) |
-| `RAPHAEL_SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite durability vs throughput (`FULL`, `NORMAL`, `OFF`) |
-| `RAPHAEL_SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite busy timeout (reduces transient “database is locked”) |
-| `RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000` | WAL autocheckpoint pages (prevents unbounded WAL growth) |
-| `RAPHAEL_INGEST_BROADCAST_MAX_ITEMS` | `500` | Max rows broadcast per ingest request (caps WS payload size) |
-| `RAPHAEL_INGEST_BROADCAST_BATCH_SIZE` | `200` | Rows per WebSocket message (batches WS frames) |
-| `RAPHAEL_PRUNE_BATCH_SIZE` | `5000` | Retention delete batch size (chunked deletes) |
-| `RAPHAEL_PRUNE_MAX_RUNTIME_MS` | `250` | Time budget per pruning run (avoids long write locks) |
+| Environment Variable                      | Default             | Description                                                  |
+| ----------------------------------------- | ------------------- | ------------------------------------------------------------ |
+| `PORT`                                    | `6274`              | Server port                                                  |
+| `RAPHAEL_DB_PATH`                         | `./data/raphael.db` | SQLite database path                                         |
+| `RAPHAEL_AUTH_ENABLED`                    | `false`             | Enable auth (sessions + API keys)                            |
+| `RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED`     | `false`             | Enable email/password login                                  |
+| `RAPHAEL_ADMIN_EMAIL`                     | `""`                | Promote this email to admin on sign-in                       |
+| `RAPHAEL_ADMIN_PASSWORD`                  | `""`                | Seed/update admin password (email/password only)             |
+| `RAPHAEL_AUTH_SESSION_TTL_HOURS`          | `168`               | Session duration in hours                                    |
+| `RAPHAEL_AUTH_TRUSTED_ORIGINS`            | `""`                | Comma-separated trusted origins for auth                     |
+| `RAPHAEL_AUTH_GOOGLE_CLIENT_ID`           | `""`                | Google OAuth client id                                       |
+| `RAPHAEL_AUTH_GOOGLE_CLIENT_SECRET`       | `""`                | Google OAuth client secret                                   |
+| `RAPHAEL_AUTH_GITHUB_CLIENT_ID`           | `""`                | GitHub OAuth client id                                       |
+| `RAPHAEL_AUTH_GITHUB_CLIENT_SECRET`       | `""`                | GitHub OAuth client secret                                   |
+| `RAPHAEL_AUTH_AZURE_TENANT_ID`            | `""`                | Azure Entra tenant id                                        |
+| `RAPHAEL_AUTH_AZURE_CLIENT_ID`            | `""`                | Azure Entra client id                                        |
+| `RAPHAEL_AUTH_AZURE_CLIENT_SECRET`        | `""`                | Azure Entra client secret                                    |
+| `RAPHAEL_AUTH_GENERIC_OAUTH`              | `""`                | JSON array of generic OAuth providers                        |
+| `BETTER_AUTH_SECRET`                      | `""`                | Required in production, 32+ chars                            |
+| `BETTER_AUTH_BASE_URL`                    | `""`                | Base URL for OAuth callbacks and redirects (recommended)     |
+| `BETTER_AUTH_URL`                         | `""`                | Legacy base URL env var (fallback)                           |
+| `RAPHAEL_SQLITE_SYNCHRONOUS`              | `NORMAL`            | SQLite durability vs throughput (`FULL`, `NORMAL`, `OFF`)    |
+| `RAPHAEL_SQLITE_BUSY_TIMEOUT_MS`          | `5000`              | SQLite busy timeout (reduces transient “database is locked”) |
+| `RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000`              | WAL autocheckpoint pages (prevents unbounded WAL growth)     |
+| `RAPHAEL_INGEST_BROADCAST_MAX_ITEMS`      | `500`               | Max rows broadcast per ingest request (caps WS payload size) |
+| `RAPHAEL_INGEST_BROADCAST_BATCH_SIZE`     | `200`               | Rows per WebSocket message (batches WS frames)               |
+| `RAPHAEL_PRUNE_BATCH_SIZE`                | `5000`              | Retention delete batch size (chunked deletes)                |
+| `RAPHAEL_PRUNE_MAX_RUNTIME_MS`            | `250`               | Time budget per pruning run (avoids long write locks)        |
 
 ## Hosting Raphael
 
@@ -192,6 +216,7 @@ See `docs/hosting.md` for a simple Docker hosting setup (non-root, read-only roo
 - Each Drop has independent retention rules (defaults: traces **3 days**, events **7 days**) configurable in the UI.
 
 Notes:
+
 - When `RAPHAEL_AUTH_ENABLED=false`, drops can be created implicitly by sending telemetry with a new drop name.
 - When `RAPHAEL_AUTH_ENABLED=true`, only admins can create/configure drops. Non-admins can only switch between drops they have query access to.
 
@@ -205,6 +230,7 @@ Notes:
 ## Settings (UI)
 
 Raphael’s Settings page is split into sub-tabs:
+
 - `Account`: auth status/mode, sign out, and a dependency summary
 - `Drops`: create/configure drops and retention (admin only when auth is enabled)
 - `Service Accounts`: create service accounts and API keys (mine-only)
@@ -227,6 +253,7 @@ Auth uses BetterAuth and only enables the providers you configure via environmen
 ### Permissions Matter
 
 When auth is enabled, access is enforced per drop:
+
 - Ingestion calls must have `ingest` access for the target drop
 - Query calls must have `query` access for the target drop
 
@@ -235,6 +262,7 @@ If a session/API key does not have permission for that drop, the request will re
 ### Service Accounts and API Keys
 
 API keys are issued to **service accounts** and scoped per drop with `ingest`/`query` permissions.
+
 - Any signed-in user can create service accounts and API keys for themselves (mine-only).
 - Service accounts and keys are managed via session auth (API keys cannot be used to call the `/api/account/*` endpoints).
 - Non-admin users can only mint API keys with permissions they already have (for example, a query-only user cannot mint ingest keys).
@@ -259,6 +287,7 @@ Member users must be created with at least one drop permission, otherwise they c
 ### OAuth Allowlist (OAuth-Only Mode)
 
 In `oauth_only` mode (auth enabled and `RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED=false`), admins can optionally restrict sign-in to:
+
 - allowed email domains
 - allowed explicit emails
 
@@ -267,6 +296,7 @@ The policy is `OR` (domain match OR email match). If both lists are empty, any O
 Admins can also set **default drop permissions** that are automatically applied to newly created OAuth member users to avoid the “can sign in but cannot see anything” first-run experience.
 
 Admin API for the allowlist/defaults:
+
 - `GET /api/admin/auth-policy`
 - `PUT /api/admin/auth-policy`
 
@@ -301,6 +331,7 @@ curl -X POST http://localhost:6274/v1/query/events \
 ```
 
 The query endpoints accept rich filters:
+
 - `q` for free-text matching
 - `where` for exact field matches
 - `range` for numeric/time ranges

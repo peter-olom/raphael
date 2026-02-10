@@ -2,6 +2,8 @@
   "name": "raphael",
   "version": "1.0.0",
   "description": "Simple local trace and wide event viewer",
+  "author": "Peter Olom <peter@olom.dev>",
+  "homepage": "https://raphael.olom.dev",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",

@@ -1,0 +1,60 @@
+:root {
+  /* Match the app's dark UI: crisp, low-saturation neutrals + blue accent. */
+  --vp-c-bg: #0b0c0e;
+  --vp-c-bg-alt: #0f1115;
+  --vp-c-bg-soft: #11141a;
+  --vp-c-bg-elv: #151922;
+
+  --vp-c-text-1: rgba(255, 255, 255, 0.92);
+  --vp-c-text-2: rgba(255, 255, 255, 0.72);
+  --vp-c-text-3: rgba(255, 255, 255, 0.52);
+
+  --vp-c-brand-1: #7b86ff;
+  --vp-c-brand-2: #9aa3ff;
+  --vp-c-brand-3: #5d6bff;
+
+  --vp-c-border: rgba(255, 255, 255, 0.10);
+  --vp-c-divider: rgba(255, 255, 255, 0.08);
+}
+
+.VPNavBar,
+.VPNavBarTitle {
+  backdrop-filter: blur(10px);
+}
+
+/* Increase header logo size (default is a bit tiny). */
+.VPNavBarTitle .logo {
+  height: 34px;
+}
+
+.VPNavBarTitle .logo img {
+  height: 34px;
+  width: 34px;
+}
+
+/* UI tour video embed */
+.vp-doc .ui-tour {
+  max-width: 100%;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* Home hero: make the subtitle ("The watcher who heals") much smaller than the product name. */
+.VPHomeHero .text {
+  font-size: clamp(14px, 2vw, 18px);
+  line-height: 1.25;
+  opacity: 0.78;
+  letter-spacing: -0.01em;
+}
+
+/* Force dark mode UX: hide appearance toggle. */
+.VPSwitchAppearance {
+  display: none !important;
+}
+
+/* Make code blocks feel like the app panels. */
+.vp-doc div[class*='language-'] {
+  background: #0f1115;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}

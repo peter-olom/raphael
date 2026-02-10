@@ -1,0 +1,10 @@
+services:
+  raphael-docs:
+    build:
+      context: .
+      dockerfile: Dockerfile.docs
+    container_name: raphael-docs
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
