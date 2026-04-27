@@ -13,7 +13,12 @@
     "build:server": "tsc",
     "build:client": "vite build",
     "start": "node dist/server/index.js",
-    "preview": "npm run build && npm run start"
+    "preview": "npm run build && npm run start",
+    "seed:large": "tsx scripts/seed-large-dataset.ts",
+    "perf:check": "tsx scripts/perf-check.ts",
+    "test:pagination": "tsx scripts/pagination-smoke.ts",
+    "test:retention": "tsx scripts/retention-smoke.ts",
+    "test:retention-paths": "tsx scripts/retention-paths-smoke.ts"
   },
   "dependencies": {
     "better-auth": "^1.4.18",

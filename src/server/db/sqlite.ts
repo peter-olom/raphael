@@ -11,6 +11,12 @@ function parsePositiveInt(raw: unknown, fallback: number) {
   return Math.floor(n);
 }
 
+function clampInt(raw: unknown, fallback: number, min: number, max: number) {
+  const n = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
 function parseSqliteSynchronous(raw: unknown): 'FULL' | 'NORMAL' | 'OFF' {
   const v = String(raw ?? '').trim().toUpperCase();
   if (v === 'FULL' || v === 'NORMAL' || v === 'OFF') return v;
@@ -359,13 +365,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_dashboards_drop_updated ON dashboards(drop_id, updated_at DESC);
 
   CREATE INDEX IF NOT EXISTS idx_traces_drop_created ON traces(drop_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_traces_drop_id ON traces(drop_id, id DESC);
   CREATE INDEX IF NOT EXISTS idx_traces_drop_trace_id ON traces(drop_id, trace_id);
-  CREATE INDEX IF NOT EXISTS idx_traces_service ON traces(service_name);
+  CREATE INDEX IF NOT EXISTS idx_traces_drop_service_id ON traces(drop_id, service_name, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_traces_drop_status_id ON traces(drop_id, status, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_traces_drop_operation_id ON traces(drop_id, operation_name, id DESC);
 
   CREATE INDEX IF NOT EXISTS idx_events_drop_created ON wide_events(drop_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_events_drop_id ON wide_events(drop_id, id DESC);
   CREATE INDEX IF NOT EXISTS idx_events_drop_trace_id ON wide_events(drop_id, trace_id);
-  CREATE INDEX IF NOT EXISTS idx_events_service ON wide_events(service_name);
-  CREATE INDEX IF NOT EXISTS idx_events_outcome ON wide_events(outcome);
+  CREATE INDEX IF NOT EXISTS idx_events_drop_service_id ON wide_events(drop_id, service_name, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_events_drop_outcome_id ON wide_events(drop_id, outcome, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_events_drop_field_id ON wide_events(drop_id, field_name, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_events_drop_user_id ON wide_events(drop_id, user_id, id DESC);
 
   CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles(email);
   CREATE INDEX IF NOT EXISTS idx_user_profiles_role ON user_profiles(role);
@@ -530,22 +542,46 @@ export function insertWideEventRow(
 }
 
 // Query helpers
-export function getRecentTraces(dropId: number, limit = 100, offset = 0) {
+export function getRecentTraces(dropId: number, limit = 100, offset = 0, beforeId?: number | null) {
+  const lim = clampLimit(limit);
+  const off = beforeId ? 0 : clampOffset(offset);
+  if (beforeId && Number.isFinite(beforeId) && beforeId > 0) {
+    return db.prepare(`
+      SELECT id, drop_id, trace_id, span_id, parent_span_id, service_name, operation_name, start_time, end_time, duration_ms, status, created_at
+      FROM traces
+      WHERE drop_id = ? AND id < ?
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(dropId, Math.floor(beforeId), lim);
+  }
   return db.prepare(`
-    SELECT * FROM traces
+    SELECT id, drop_id, trace_id, span_id, parent_span_id, service_name, operation_name, start_time, end_time, duration_ms, status, created_at
+    FROM traces
     WHERE drop_id = ?
-    ORDER BY created_at DESC
+    ORDER BY id DESC
     LIMIT ? OFFSET ?
-  `).all(dropId, limit, offset);
+  `).all(dropId, lim, off);
 }
 
-export function getRecentWideEvents(dropId: number, limit = 100, offset = 0) {
+export function getRecentWideEvents(dropId: number, limit = 100, offset = 0, beforeId?: number | null) {
+  const lim = clampLimit(limit);
+  const off = beforeId ? 0 : clampOffset(offset);
+  if (beforeId && Number.isFinite(beforeId) && beforeId > 0) {
+    return db.prepare(`
+      SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at
+      FROM wide_events
+      WHERE drop_id = ? AND id < ?
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(dropId, Math.floor(beforeId), lim);
+  }
   return db.prepare(`
-    SELECT * FROM wide_events
+    SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at
+    FROM wide_events
     WHERE drop_id = ?
-    ORDER BY created_at DESC
+    ORDER BY id DESC
     LIMIT ? OFFSET ?
-  `).all(dropId, limit, offset);
+  `).all(dropId, lim, off);
 }
 
 export function getTraceById(dropId: number, traceId: string) {
@@ -557,46 +593,56 @@ export function getTraceById(dropId: number, traceId: string) {
   `).all(dropId, traceId);
 }
 
+export function getWideEventById(dropId: number, eventId: number) {
+  return db.prepare(`
+    SELECT * FROM wide_events
+    WHERE drop_id = ?
+      AND id = ?
+  `).get(dropId, eventId);
+}
+
 export function getWideEventsByTraceId(dropId: number, traceId: string) {
   return db.prepare(`
     SELECT * FROM wide_events
     WHERE drop_id = ?
       AND trace_id = ?
-    ORDER BY created_at ASC
+    ORDER BY id ASC
   `).all(dropId, traceId);
 }
 
 export function searchTraces(dropId: number, query: string, limit = 100) {
   const pattern = `%${query}%`;
+  const lim = clampLimit(limit);
   return db.prepare(`
-    SELECT * FROM traces
+    SELECT id, drop_id, trace_id, span_id, parent_span_id, service_name, operation_name, start_time, end_time, duration_ms, status, created_at
+    FROM traces
     WHERE drop_id = ?
       AND (
         service_name LIKE ?
         OR operation_name LIKE ?
         OR trace_id LIKE ?
-        OR attributes LIKE ?
       )
-    ORDER BY created_at DESC
+    ORDER BY id DESC
     LIMIT ?
-  `).all(dropId, pattern, pattern, pattern, pattern, limit);
+  `).all(dropId, pattern, pattern, pattern, lim);
 }
 
 export function searchWideEvents(dropId: number, query: string, limit = 100) {
   const pattern = `%${query}%`;
+  const lim = clampLimit(limit);
   return db.prepare(`
-    SELECT * FROM wide_events
+    SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at
+    FROM wide_events
     WHERE drop_id = ?
       AND (
         service_name LIKE ?
         OR field_name LIKE ?
         OR trace_id LIKE ?
         OR user_id LIKE ?
-        OR attributes LIKE ?
       )
-    ORDER BY created_at DESC
+    ORDER BY id DESC
     LIMIT ?
-  `).all(dropId, pattern, pattern, pattern, pattern, pattern, limit);
+  `).all(dropId, pattern, pattern, pattern, pattern, lim);
 }
 
 export function getStats(dropId: number) {
@@ -850,14 +896,40 @@ const deleteOldEventsBatch = db.prepare(`
   )
 `);
 
+function isSqliteBusy(error: unknown) {
+  const code = (error as any)?.code?.toString?.() ?? '';
+  const message = (error as Error)?.message ?? '';
+  return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED' || /database is locked|database table is locked/i.test(message);
+}
+
+export interface RetentionPruneResult {
+  drop_id: number;
+  traces_deleted: number;
+  events_deleted: number;
+  batches: number;
+  runtime_ms: number;
+  timed_out: boolean;
+  busy: boolean;
+}
+
+export function getRetentionPruneConfig() {
+  return {
+    batch_size: clampInt(process.env.RAPHAEL_PRUNE_BATCH_SIZE, 1000, 100, 50_000),
+    max_runtime_ms: clampInt(process.env.RAPHAEL_PRUNE_MAX_RUNTIME_MS, 100, 25, 5_000),
+  };
+}
+
 export function pruneByRetention(dropId?: number, now = Date.now()) {
   const drops = dropId === undefined ? (db.prepare(`SELECT id FROM drops`).all() as Array<{ id: number }>) : [{ id: dropId }];
 
-  const results: Array<{ drop_id: number; traces_deleted: number; events_deleted: number }> = [];
+  const results: RetentionPruneResult[] = [];
 
-  const batchSize = parsePositiveInt(process.env.RAPHAEL_PRUNE_BATCH_SIZE, 5000);
-  const maxRuntimeMs = parsePositiveInt(process.env.RAPHAEL_PRUNE_MAX_RUNTIME_MS, 250);
-  const deadline = Date.now() + maxRuntimeMs;
+  // Keep each SQLite write transaction small and keep each prune pass bounded.
+  // Defaults favor UI/query responsiveness over immediate cleanup; env overrides
+  // are capped so an unsafe value cannot create one huge delete transaction.
+  const { batch_size: batchSize, max_runtime_ms: maxRuntimeMs } = getRetentionPruneConfig();
+  const startedAt = Date.now();
+  const deadline = startedAt + maxRuntimeMs;
 
   for (const d of drops) {
     const retention = getDropRetention(d.id);
@@ -874,27 +946,57 @@ export function pruneByRetention(dropId?: number, now = Date.now()) {
 
     let tracesDeleted = 0;
     let eventsDeleted = 0;
+    let batches = 0;
+    let busy = false;
 
-    if (tracesCutoff !== null) {
-      while (Date.now() < deadline) {
-        const changes = deleteOldTracesBatch.run(d.id, tracesCutoff, batchSize).changes;
-        tracesDeleted += changes;
-        if (changes === 0) break;
+    let tracesDone = tracesCutoff === null;
+    let eventsDone = eventsCutoff === null;
+
+    // Alternate tables so a large trace backlog cannot starve wide-event cleanup
+    // for the entire bounded prune pass (and vice versa). Each statement remains
+    // its own short SQLite write transaction.
+    while (Date.now() < deadline && (!tracesDone || !eventsDone)) {
+      if (!tracesDone && tracesCutoff !== null) {
+        try {
+          const changes = deleteOldTracesBatch.run(d.id, tracesCutoff, batchSize).changes;
+          batches++;
+          tracesDeleted += changes;
+          if (changes === 0) tracesDone = true;
+        } catch (error) {
+          if (!isSqliteBusy(error)) throw error;
+          busy = true;
+          break;
+        }
+      }
+
+      if (busy || Date.now() >= deadline) break;
+
+      if (!eventsDone && eventsCutoff !== null) {
+        try {
+          const changes = deleteOldEventsBatch.run(d.id, eventsCutoff, batchSize).changes;
+          batches++;
+          eventsDeleted += changes;
+          if (changes === 0) eventsDone = true;
+        } catch (error) {
+          if (!isSqliteBusy(error)) throw error;
+          busy = true;
+          break;
+        }
       }
     }
 
-    if (eventsCutoff !== null) {
-      while (Date.now() < deadline) {
-        const changes = deleteOldEventsBatch.run(d.id, eventsCutoff, batchSize).changes;
-        eventsDeleted += changes;
-        if (changes === 0) break;
-      }
-    }
+    results.push({
+      drop_id: d.id,
+      traces_deleted: tracesDeleted,
+      events_deleted: eventsDeleted,
+      batches,
+      runtime_ms: Date.now() - startedAt,
+      timed_out: Date.now() >= deadline,
+      busy,
+    });
 
-    results.push({ drop_id: d.id, traces_deleted: tracesDeleted, events_deleted: eventsDeleted });
-
-    // Respect the time budget across drops.
-    if (Date.now() >= deadline) break;
+    // Respect the time budget and back off on lock contention across drops.
+    if (busy || Date.now() >= deadline) break;
   }
 
   return results;
@@ -1608,8 +1710,8 @@ export function queryTraces(dropId: number, query: TraceQuery) {
 
   if (query.q) {
     const pattern = `%${query.q}%`;
-    where.push(`(service_name LIKE ? OR operation_name LIKE ? OR trace_id LIKE ? OR attributes LIKE ?)`);
-    params.push(pattern, pattern, pattern, pattern);
+    where.push(`(service_name LIKE ? OR operation_name LIKE ? OR trace_id LIKE ?)`);
+    params.push(pattern, pattern, pattern);
   }
 
   if (query.where?.trace_id) {
@@ -1640,9 +1742,10 @@ export function queryTraces(dropId: number, query: TraceQuery) {
   const limit = clampLimit(query.limit);
   const offset = clampOffset(query.offset);
   const sql = `
-    SELECT * FROM traces
+    SELECT id, drop_id, trace_id, span_id, parent_span_id, service_name, operation_name, start_time, end_time, duration_ms, status, created_at
+    FROM traces
     WHERE ${where.join(' AND ')}
-    ORDER BY created_at ${order}
+    ORDER BY id ${order}
     LIMIT ? OFFSET ?
   `;
   return db.prepare(sql).all(...params, limit, offset);
@@ -1654,8 +1757,8 @@ export function queryWideEvents(dropId: number, query: WideEventQuery) {
 
   if (query.q) {
     const pattern = `%${query.q}%`;
-    where.push(`(service_name LIKE ? OR field_name LIKE ? OR trace_id LIKE ? OR user_id LIKE ? OR attributes LIKE ?)`);
-    params.push(pattern, pattern, pattern, pattern, pattern);
+    where.push(`(service_name LIKE ? OR field_name LIKE ? OR trace_id LIKE ? OR user_id LIKE ?)`);
+    params.push(pattern, pattern, pattern, pattern);
   }
 
   if (query.where?.trace_id) {
@@ -1694,9 +1797,10 @@ export function queryWideEvents(dropId: number, query: WideEventQuery) {
   const limit = clampLimit(query.limit);
   const offset = clampOffset(query.offset);
   const sql = `
-    SELECT * FROM wide_events
+    SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at
+    FROM wide_events
     WHERE ${where.join(' AND ')}
-    ORDER BY created_at ${order}
+    ORDER BY id ${order}
     LIMIT ? OFFSET ?
   `;
   return db.prepare(sql).all(...params, limit, offset);
