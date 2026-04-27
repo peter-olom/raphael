@@ -16,7 +16,7 @@ interface Trace {
   end_time: number | null;
   duration_ms: number | null;
   status: string;
-  attributes: string;
+  attributes?: string;
   created_at: number;
 }
 
@@ -32,7 +32,7 @@ interface WideEvent {
   user_id: string | null;
   error_count: number;
   rpc_call_count: number;
-  attributes: string;
+  attributes?: string;
   created_at: number;
 }
 
@@ -52,6 +52,8 @@ interface Drop {
 }
 
 type Tab = 'events' | 'traces' | 'dashboards' | 'settings';
+
+const LIST_PAGE_SIZE = 100;
 
 const styles = {
   container: {
@@ -1688,6 +1690,9 @@ export default function App() {
   const initialSettingsTab: SettingsTab =
     parseSettingsTab(new URLSearchParams(window.location.search).get('settings')) ?? 'account';
 
+  const initialDropRaw = new URLSearchParams(window.location.search).get('drop');
+  const initialDropId = initialDropRaw && /^\d+$/.test(initialDropRaw) ? Number.parseInt(initialDropRaw, 10) : null;
+
   const [tab, setTab] = useState<Tab>(initialTab);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(initialSettingsTab);
   const [authEnabled, setAuthEnabled] = useState<boolean | null>(null);
@@ -1763,11 +1768,14 @@ export default function App() {
   const [accountDropsLoaded, setAccountDropsLoaded] = useState(false);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [events, setEvents] = useState<WideEvent[]>([]);
+  const [traceNextCursor, setTraceNextCursor] = useState<number | null>(null);
+  const [eventNextCursor, setEventNextCursor] = useState<number | null>(null);
+  const [listLoading, setListLoading] = useState(false);
   const [stats, setStats] = useState<Stats>({ traces: 0, wideEvents: 0, errors: 0 });
   const [search, setSearch] = useState('');
   const [drops, setDrops] = useState<Drop[]>([]);
   const [defaultDropId, setDefaultDropId] = useState<number | null>(null);
-  const [dropId, setDropId] = useState<number | null>(null);
+  const [dropId, setDropId] = useState<number | null>(initialDropId);
   const dropIdRef = useRef<number | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [eventFilters, setEventFilters] = useState<FilterState>({});
@@ -1954,19 +1962,53 @@ export default function App() {
     if (!authReady) return;
     if (dataLocked) return;
     if (dropIdRef.current === null) return;
+    setListLoading(true);
     try {
       const [tracesRes, eventsRes, statsRes] = await Promise.all([
-        fetch(`/api/traces?dropId=${dropIdRef.current}`),
-        fetch(`/api/events?dropId=${dropIdRef.current}`),
+        fetch(`/api/traces?dropId=${dropIdRef.current}&limit=${LIST_PAGE_SIZE}&envelope=1`),
+        fetch(`/api/events?dropId=${dropIdRef.current}&limit=${LIST_PAGE_SIZE}&envelope=1`),
         fetch(`/api/stats?dropId=${dropIdRef.current}`),
       ]);
-      setTraces(await tracesRes.json());
-      setEvents(await eventsRes.json());
+      const tracesJson = await tracesRes.json();
+      const eventsJson = await eventsRes.json();
+      setTraces(tracesJson.items ?? tracesJson);
+      setEvents(eventsJson.items ?? eventsJson);
+      setTraceNextCursor(tracesJson.nextCursor ?? null);
+      setEventNextCursor(eventsJson.nextCursor ?? null);
       setStats(await statsRes.json());
     } catch (error) {
       console.error('Failed to fetch data:', error);
+    } finally {
+      setListLoading(false);
     }
   }, [authReady, dataLocked]);
+
+  const fetchMoreListRows = useCallback(async () => {
+    if (!authReady) return;
+    if (dataLocked) return;
+    if (dropIdRef.current === null) return;
+    if (tab !== 'events' && tab !== 'traces') return;
+    const cursor = tab === 'events' ? eventNextCursor : traceNextCursor;
+    if (!cursor) return;
+    setListLoading(true);
+    try {
+      const resource = tab === 'events' ? 'events' : 'traces';
+      const res = await fetch(`/api/${resource}?dropId=${dropIdRef.current}&limit=${LIST_PAGE_SIZE}&beforeId=${cursor}&envelope=1`);
+      const json = await res.json();
+      const items = json.items ?? json;
+      if (tab === 'events') {
+        setEvents((prev) => [...prev, ...items]);
+        setEventNextCursor(json.nextCursor ?? null);
+      } else {
+        setTraces((prev) => [...prev, ...items]);
+        setTraceNextCursor(json.nextCursor ?? null);
+      }
+    } catch (error) {
+      console.error('Failed to fetch more rows:', error);
+    } finally {
+      setListLoading(false);
+    }
+  }, [authReady, dataLocked, tab, eventNextCursor, traceNextCursor]);
 
   const fetchDrops = useCallback(async () => {
     if (!authReady) return;
@@ -2465,14 +2507,16 @@ export default function App() {
       if (tab === 'dashboards' || tab === 'settings') return;
       if (tab === 'traces') {
         const res = await fetch(
-          `/api/search/traces?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}`
+          `/api/search/traces?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}&limit=${LIST_PAGE_SIZE}`
         );
         setTraces(await res.json());
+        setTraceNextCursor(null);
       } else {
         const res = await fetch(
-          `/api/search/events?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}`
+          `/api/search/events?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}&limit=${LIST_PAGE_SIZE}`
         );
         setEvents(await res.json());
+        setEventNextCursor(null);
       }
     } catch (error) {
       console.error('Search failed:', error);
@@ -2794,6 +2838,19 @@ export default function App() {
   const clearAllFilters = () => {
     if (tab === 'events') setEventFilters({});
     else setTraceFilters({});
+  };
+
+  const openEventDetail = async (event: WideEvent) => {
+    setSelected({ type: 'event', event });
+    if (dropIdRef.current === null || event.attributes) return;
+    try {
+      const res = await fetch(`/api/events/${event.id}?dropId=${dropIdRef.current}`);
+      if (!res.ok) return;
+      const full = (await res.json()) as WideEvent;
+      setSelected((prev) => (prev?.type === 'event' && prev.event.id === event.id ? { type: 'event', event: full } : prev));
+    } catch (error) {
+      console.error('Failed to load event details:', error);
+    }
   };
 
   const handleCreateDrop = async () => {
@@ -3713,6 +3770,9 @@ export default function App() {
               <button style={styles.button} onClick={() => setPaused(!paused)}>
                 {paused ? 'Resume' : 'Pause'}
               </button>
+              <div style={styles.pill}>
+                Loaded <span style={{ color: '#fff' }}>{tab === 'events' ? events.length : traces.length}</span> latest rows
+              </div>
               <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={handleClear}>
                 Clear
               </button>
@@ -5568,7 +5628,7 @@ export default function App() {
                     <tr
                       key={event.id || `${event.trace_id}-${event.created_at}`}
                       style={styles.row}
-                      onClick={() => setSelected({ type: 'event', event })}
+                      onClick={() => openEventDetail(event)}
                     >
                       <td style={styles.td}>{formatTime(getEventTime(event))}</td>
                       <td style={styles.td}>{event.service_name}</td>
@@ -5637,6 +5697,21 @@ export default function App() {
                 ))}
               </tbody>
             </table>
+          )}
+          {tab !== 'dashboards' && tab !== 'settings' && (
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', padding: '16px' }}>
+              <button
+                style={styles.button}
+                onClick={fetchMoreListRows}
+                disabled={listLoading || (tab === 'events' ? !eventNextCursor : !traceNextCursor) || Boolean(search.trim())}
+                title={search.trim() ? 'Clear search to page through the latest rows' : undefined}
+              >
+                {listLoading ? 'Loading…' : tab === 'events' ? (eventNextCursor ? 'Load older events' : 'No more loaded pages') : (traceNextCursor ? 'Load older traces' : 'No more loaded pages')}
+              </button>
+              <button style={styles.button} onClick={fetchData} disabled={listLoading}>
+                Refresh latest {LIST_PAGE_SIZE}
+              </button>
+            </div>
           )}
         </div>
       </main>

@@ -9,7 +9,7 @@ import { eventsRouter } from './routes/events.js';
 import { apiRouter } from './routes/api.js';
 import { queryRouter } from './routes/query.js';
 import { setupWebSocket } from './websocket.js';
-import { pruneByRetention } from './db/sqlite.js';
+import { startRetentionScheduler } from './retention.js';
 import { authEnabled, authMiddleware, ensureAdminSeed, getAuthConfigSummary, getAuthNodeHandler } from './auth.js';
 import { toNodeHandler } from 'better-auth/node';
 import { adminRouter } from './routes/admin.js';
@@ -67,19 +67,9 @@ app.get('*', (req, res, next) => {
 // Setup WebSocket
 setupWebSocket(server);
 
-// Auto-truncation (retention rules per Drop)
-try {
-  pruneByRetention();
-  setInterval(() => {
-    try {
-      pruneByRetention();
-    } catch (error) {
-      console.error('Retention pruning failed:', error);
-    }
-  }, 60_000);
-} catch (error) {
-  console.error('Initial retention pruning failed:', error);
-}
+// Auto-truncation (retention rules per Drop). Runs only in the background
+// scheduler so request handlers never perform retention cleanup inline.
+startRetentionScheduler();
 
 const PORT = process.env.PORT || 6274;
 

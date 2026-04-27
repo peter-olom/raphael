@@ -187,8 +187,11 @@ curl -X POST http://localhost:6274/v1/events \
 | `RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000`              | WAL autocheckpoint pages (prevents unbounded WAL growth)     |
 | `RAPHAEL_INGEST_BROADCAST_MAX_ITEMS`      | `500`               | Max rows broadcast per ingest request (caps WS payload size) |
 | `RAPHAEL_INGEST_BROADCAST_BATCH_SIZE`     | `200`               | Rows per WebSocket message (batches WS frames)               |
-| `RAPHAEL_PRUNE_BATCH_SIZE`                | `5000`              | Retention delete batch size (chunked deletes)                |
-| `RAPHAEL_PRUNE_MAX_RUNTIME_MS`            | `250`               | Time budget per pruning run (avoids long write locks)        |
+| `RAPHAEL_RETENTION_ENABLED`               | `true`              | Enable background retention pruning                          |
+| `RAPHAEL_RETENTION_INITIAL_DELAY_MS`      | `15000`             | Delay before first background retention run                  |
+| `RAPHAEL_RETENTION_INTERVAL_MS`           | `60000`             | Background retention interval (capped to 10s..1h)            |
+| `RAPHAEL_PRUNE_BATCH_SIZE`                | `1000`              | Retention delete batch size (capped to 100..50000)           |
+| `RAPHAEL_PRUNE_MAX_RUNTIME_MS`            | `100`               | Time budget per pruning run (capped to 25..5000ms)           |
 
 ## Hosting Raphael
 
@@ -214,6 +217,8 @@ See `docs/hosting.md` for a simple Docker hosting setup (non-root, read-only roo
 - **Drops** isolate telemetry streams (e.g., `staging` vs `production`). Select Drops in the UI. Admins can create/configure drops.
 - Ingestion endpoints support selecting a Drop by name via the `X-Raphael-Drop` header (or `?drop=` query param).
 - Each Drop has independent retention rules (defaults: traces **3 days**, events **7 days**) configurable in the UI.
+
+Retention cleanup is intentionally low impact: it only runs in the background scheduler, never in dashboard/list/query request paths, and retention setting changes do not prune inline. Each run is time-budgeted, uses indexed `(drop_id, created_at)` predicates, alternates trace/event delete batches, and backs off on SQLite busy/lock errors. For maintenance windows, temporarily increase `RAPHAEL_PRUNE_BATCH_SIZE` and `RAPHAEL_PRUNE_MAX_RUNTIME_MS`; automatic `VACUUM` is not run during normal operation.
 
 Notes:
 

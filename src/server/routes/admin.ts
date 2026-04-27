@@ -13,6 +13,7 @@ import {
   createUserProfileIfMissing,
 } from '../db/sqlite.js';
 import { authEnabled, getAuth, requireAdmin, requireAuth } from '../auth.js';
+import { getRetentionSchedulerStatus } from '../retention.js';
 
 export const adminRouter = Router();
 
@@ -63,6 +64,11 @@ function isProtectedAdminEmail(email: string) {
   const adminEmail = (process.env.RAPHAEL_ADMIN_EMAIL || '').trim().toLowerCase();
   return Boolean(adminEmail && normalizeEmail(email) === adminEmail);
 }
+
+adminRouter.get('/retention', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  res.json(getRetentionSchedulerStatus());
+});
 
 adminRouter.get('/me', (req: Request, res: Response) => {
   if (!authEnabled()) {

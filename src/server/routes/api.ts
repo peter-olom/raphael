@@ -15,6 +15,7 @@ import {
   getRecentTraces,
   getRecentWideEvents,
   getTraceById,
+  getWideEventById,
   getWideEventsByTraceId,
   searchTraces,
   searchWideEvents,
@@ -22,7 +23,6 @@ import {
   clearAll,
   listDrops,
   listUserDropPermissions,
-  pruneByRetention,
   deleteDrop,
   setDropLabel,
   setDropRetentionMs,
@@ -33,6 +33,30 @@ import { decryptSecret, encryptSecret } from '../secrets.js';
 import { authEnabled, noteApiKeyUsageDrop, requireAdmin, requireAuth, requireDropAccess } from '../auth.js';
 
 export const apiRouter = Router();
+
+function parseLimit(raw: unknown, fallback = 100) {
+  const n = Number(Array.isArray(raw) ? raw[0] : raw ?? fallback);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(1, Math.min(2000, Math.floor(n)));
+}
+
+function parseOffset(raw: unknown) {
+  const n = Number(Array.isArray(raw) ? raw[0] : raw ?? 0);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+function parsePositiveCursor(raw: unknown): number | null {
+  const n = Number(Array.isArray(raw) ? raw[0] : raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+function listPayload<T extends { id?: number }>(req: Request, items: T[], limit: number) {
+  if (req.query.envelope !== '1') return items;
+  const nextCursor = items.length === limit ? items[items.length - 1]?.id ?? null : null;
+  return { items, limit, nextCursor };
+}
 
 function getDropId(req: Request, res: Response): number | null {
   const raw = req.query.dropId ?? req.query.drop ?? req.header('x-raphael-drop');
@@ -53,10 +77,11 @@ apiRouter.get('/traces', (req: Request, res: Response) => {
   const dropId = getDropId(req, res);
   if (dropId === null) return;
   if (!requireDropAccess(req, res, dropId, 'query')) return;
-  const limit = parseInt(req.query.limit as string) || 100;
-  const offset = parseInt(req.query.offset as string) || 0;
-  const traces = getRecentTraces(dropId, limit, offset);
-  res.json(traces);
+  const limit = parseLimit(req.query.limit);
+  const offset = parseOffset(req.query.offset);
+  const beforeId = parsePositiveCursor(req.query.beforeId ?? req.query.cursor);
+  const traces = getRecentTraces(dropId, limit, offset, beforeId);
+  res.json(listPayload(req, traces as Array<{ id?: number }>, limit));
 });
 
 // Get recent wide events
@@ -65,10 +90,30 @@ apiRouter.get('/events', (req: Request, res: Response) => {
   const dropId = getDropId(req, res);
   if (dropId === null) return;
   if (!requireDropAccess(req, res, dropId, 'query')) return;
-  const limit = parseInt(req.query.limit as string) || 100;
-  const offset = parseInt(req.query.offset as string) || 0;
-  const events = getRecentWideEvents(dropId, limit, offset);
-  res.json(events);
+  const limit = parseLimit(req.query.limit);
+  const offset = parseOffset(req.query.offset);
+  const beforeId = parsePositiveCursor(req.query.beforeId ?? req.query.cursor);
+  const events = getRecentWideEvents(dropId, limit, offset, beforeId);
+  res.json(listPayload(req, events as Array<{ id?: number }>, limit));
+});
+
+apiRouter.get('/events/:eventId', (req: Request, res: Response) => {
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null) return;
+  if (!requireDropAccess(req, res, dropId, 'query')) return;
+  const raw = (req.params as any).eventId as string | string[];
+  const eventId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
+  if (!Number.isFinite(eventId) || eventId <= 0) {
+    res.status(400).json({ error: 'Invalid event id' });
+    return;
+  }
+  const event = getWideEventById(dropId, eventId);
+  if (!event) {
+    res.status(404).json({ error: 'Event not found' });
+    return;
+  }
+  res.json(event);
 });
 
 // Get trace by ID (all spans)
@@ -91,7 +136,7 @@ apiRouter.get('/search/traces', (req: Request, res: Response) => {
   if (dropId === null) return;
   if (!requireDropAccess(req, res, dropId, 'query')) return;
   const query = req.query.q as string || '';
-  const limit = parseInt(req.query.limit as string) || 100;
+  const limit = parseLimit(req.query.limit);
   const results = searchTraces(dropId, query, limit);
   res.json(results);
 });
@@ -103,7 +148,7 @@ apiRouter.get('/search/events', (req: Request, res: Response) => {
   if (dropId === null) return;
   if (!requireDropAccess(req, res, dropId, 'query')) return;
   const query = req.query.q as string || '';
-  const limit = parseInt(req.query.limit as string) || 100;
+  const limit = parseLimit(req.query.limit);
   const results = searchWideEvents(dropId, query, limit);
   res.json(results);
 });
@@ -204,8 +249,7 @@ apiRouter.put('/drops/:dropId/retention', (req: Request, res: Response) => {
         : Math.round(eventsDays * 24 * 60 * 60 * 1000);
 
   setDropRetentionMs(dropId, tracesRetentionMs, eventsRetentionMs);
-  pruneByRetention(dropId);
-  res.json({ success: true });
+  res.json({ success: true, pruning_scheduled: false });
 });
 
 apiRouter.put('/drops/:dropId/label', (req: Request, res: Response) => {
