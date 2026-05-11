@@ -79,6 +79,8 @@ docker compose up -d
 
 Raphael will be available at `http://localhost:6274`
 
+For compatibility with existing Compose deployments, Docker publishes on all interfaces unless `RAPHAEL_HOST_BIND` is set. For local-only installs, set `RAPHAEL_HOST_BIND=127.0.0.1`; expose it publicly only behind auth, TLS, and a trusted network boundary.
+
 ### Using Node.js
 
 ```bash
@@ -167,10 +169,14 @@ curl -X POST http://localhost:6274/v1/events \
 | `RAPHAEL_DB_PATH`                         | `./data/raphael.db` | SQLite database path                                         |
 | `RAPHAEL_AUTH_ENABLED`                    | `false`             | Enable auth (sessions + API keys)                            |
 | `RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED`     | `false`             | Enable email/password login                                  |
+| `RAPHAEL_ALLOW_UNAUTH_ADMIN`              | `false`             | Allow admin mutations without auth in production             |
+| `RAPHAEL_ALLOW_FIRST_USER_ADMIN`          | `false` in prod     | Promote first login to admin                                 |
 | `RAPHAEL_ADMIN_EMAIL`                     | `""`                | Promote this email to admin on sign-in                       |
 | `RAPHAEL_ADMIN_PASSWORD`                  | `""`                | Seed/update admin password (email/password only)             |
 | `RAPHAEL_AUTH_SESSION_TTL_HOURS`          | `168`               | Session duration in hours                                    |
 | `RAPHAEL_AUTH_TRUSTED_ORIGINS`            | `""`                | Comma-separated trusted origins for auth                     |
+| `RAPHAEL_CORS_ORIGINS`                    | `""`                | Comma-separated origins allowed for browser API access       |
+| `RAPHAEL_TRUST_PROXY`                     | `loopback`          | Trusted proxy setting for forwarded client IPs               |
 | `RAPHAEL_AUTH_GOOGLE_CLIENT_ID`           | `""`                | Google OAuth client id                                       |
 | `RAPHAEL_AUTH_GOOGLE_CLIENT_SECRET`       | `""`                | Google OAuth client secret                                   |
 | `RAPHAEL_AUTH_GITHUB_CLIENT_ID`           | `""`                | GitHub OAuth client id                                       |
@@ -187,11 +193,20 @@ curl -X POST http://localhost:6274/v1/events \
 | `RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000`              | WAL autocheckpoint pages (prevents unbounded WAL growth)     |
 | `RAPHAEL_INGEST_BROADCAST_MAX_ITEMS`      | `500`               | Max rows broadcast per ingest request (caps WS payload size) |
 | `RAPHAEL_INGEST_BROADCAST_BATCH_SIZE`     | `200`               | Rows per WebSocket message (batches WS frames)               |
+| `RAPHAEL_INGEST_MAX_ITEMS`                | `5000`              | Max spans/events accepted in a single ingest request         |
+| `RAPHAEL_INGEST_RATE_LIMIT_REQUESTS_PER_MINUTE` | `600`         | Per-actor ingest request budget (`0` disables)               |
+| `RAPHAEL_INGEST_RATE_LIMIT_ITEMS_PER_MINUTE` | `60000`          | Per-actor spans/events/log-record budget (`0` disables)      |
+| `RAPHAEL_INGEST_RATE_LIMIT_BURST_MULTIPLIER` | `2`             | Token bucket burst multiplier for ingest limits              |
+| `RAPHAEL_SEARCH_ATTRIBUTES_ENABLED`        | `false`             | Include JSON attributes in broad substring search            |
+| `RAPHAEL_WS_MAX_PAYLOAD_BYTES`             | `65536`             | Max inbound WebSocket message size                           |
+| `RAPHAEL_WS_MAX_BUFFERED_BYTES`            | `1048576`           | Backpressure limit before slow WebSocket clients are closed  |
 | `RAPHAEL_RETENTION_ENABLED`               | `true`              | Enable background retention pruning                          |
 | `RAPHAEL_RETENTION_INITIAL_DELAY_MS`      | `15000`             | Delay before first background retention run                  |
 | `RAPHAEL_RETENTION_INTERVAL_MS`           | `60000`             | Background retention interval (capped to 10s..1h)            |
 | `RAPHAEL_PRUNE_BATCH_SIZE`                | `1000`              | Retention delete batch size (capped to 100..50000)           |
 | `RAPHAEL_PRUNE_MAX_RUNTIME_MS`            | `100`               | Time budget per pruning run (capped to 25..5000ms)           |
+| `RAPHAEL_SQLITE_FULL_VACUUM`               | `false`             | Force full SQLite VACUUM during compaction                   |
+| `RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES` | `2048`             | Full VACUUM threshold when incremental reclaim is insufficient |
 
 ## Hosting Raphael
 
@@ -249,11 +264,17 @@ Auth is disabled by default. Set `RAPHAEL_AUTH_ENABLED=true` to activate the log
 
 Auth uses BetterAuth and only enables the providers you configure via environment variables. If you only enable OAuth providers, no password flow is available.
 
-- First user to sign in becomes **admin**
+- In non-production, the first user to sign in becomes **admin** unless disabled
+- In production, set `RAPHAEL_ADMIN_EMAIL` or explicitly set `RAPHAEL_ALLOW_FIRST_USER_ADMIN=true`
+- Production auth startup fails if there is no existing admin and no explicit admin bootstrap path
 - `RAPHAEL_ADMIN_EMAIL` is always promoted to admin on sign-in
 - The user matching `RAPHAEL_ADMIN_EMAIL` is protected (cannot be demoted or disabled via the admin API/UI)
 - If `RAPHAEL_ADMIN_PASSWORD` changes and email/password login is enabled, the password hash is updated
 - Admins manage users (admin/member), disable users, and control per-Drop `ingest`/`query` access
+
+When auth is disabled in production, admin mutations are denied unless `RAPHAEL_ALLOW_UNAUTH_ADMIN=true`. Keep unauthenticated deployments bound to localhost or an equivalent private interface.
+
+Reverse proxies on loopback are trusted by default for forwarded client IPs. For non-loopback proxies, set `RAPHAEL_TRUST_PROXY` to the specific trusted subnet or hop count, and make sure the proxy overwrites forwarded headers.
 
 ### Permissions Matter
 

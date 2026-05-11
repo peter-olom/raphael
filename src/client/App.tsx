@@ -1,1663 +1,17 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createAuthClient } from 'better-auth/client';
 import type { DashboardRow, DashboardSpecV1, WidgetSpec } from './dashboards/types';
 import { computeWidget, parseDashboardSpec } from './dashboards/render';
 import GridLayout, { useContainerWidth, type Layout } from 'react-grid-layout';
-
-interface Trace {
-  id: number;
-  drop_id?: number;
-  trace_id: string;
-  span_id: string;
-  parent_span_id: string | null;
-  service_name: string;
-  operation_name: string;
-  start_time: number;
-  end_time: number | null;
-  duration_ms: number | null;
-  status: string;
-  attributes?: string;
-  created_at: number;
-}
-
-interface WideEvent {
-  id: number;
-  drop_id?: number;
-  trace_id: string | null;
-  service_name: string;
-  operation_type: string | null;
-  field_name: string | null;
-  outcome: string;
-  duration_ms: number | null;
-  user_id: string | null;
-  error_count: number;
-  rpc_call_count: number;
-  attributes?: string;
-  created_at: number;
-}
-
-interface Stats {
-  traces: number;
-  wideEvents: number;
-  errors: number;
-}
-
-interface Drop {
-  id: number;
-  name: string;
-  label: string | null;
-  created_at: number;
-  traces_retention_ms: number | null;
-  events_retention_ms: number | null;
-}
-
-type Tab = 'events' | 'traces' | 'dashboards' | 'settings';
+import { styles } from './styles';
+import type { Drop, Stats, Tab, Trace, WideEvent } from './types';
+import { DASHBOARD_COLS, DASHBOARD_ROW_HEIGHT, addPlacedWidget, clampInt, defaultWidgetLayout, normalizeDashboardSpec } from './dashboardLayout';
+import { applyFilters, computeFieldStats, normalizeFilterKey, type FilterSetter, type FilterState } from './filters';
+import { fetchJson, formatNumber, truncate } from './utils';
+import { EventDetailModal, TraceDetailModal, type Selected } from './DetailModals';
+import { EventsTable, TracesTable } from './TelemetryTables';
 
 const LIST_PAGE_SIZE = 100;
-
-const styles = {
-  container: {
-    minHeight: '100vh',
-    display: 'flex',
-    flexDirection: 'column' as const,
-  },
-  header: {
-    position: 'sticky' as const,
-    top: 0,
-    zIndex: 100,
-    height: '72px',
-    boxSizing: 'border-box' as const,
-    background: 'rgba(14, 14, 14, 0.86)',
-    backdropFilter: 'blur(12px)',
-    borderBottom: '1px solid rgba(255,255,255,0.10)',
-    padding: '14px 24px',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  logo: {
-    fontSize: '24px',
-    fontWeight: 900,
-    color: '#fff',
-    letterSpacing: '-0.01em',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '10px',
-    textShadow: '0 10px 30px rgba(0,0,0,0.55)',
-  },
-  stats: {
-    display: 'flex',
-    gap: '24px',
-  },
-  stat: {
-    textAlign: 'center' as const,
-  },
-  statValue: {
-    fontSize: '20px',
-    fontWeight: 600,
-    color: '#fff',
-  },
-  statLabel: {
-    fontSize: '12px',
-    color: '#888',
-  },
-  main: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column' as const,
-  },
-  stickyNav: {
-    position: 'sticky' as const,
-    top: '72px',
-    zIndex: 80,
-    background: 'rgba(12, 12, 12, 0.86)',
-    backdropFilter: 'blur(12px)',
-    borderBottom: '1px solid rgba(255,255,255,0.10)',
-  },
-  tabs: {
-    display: 'flex',
-    background: 'transparent',
-    borderBottom: '1px solid rgba(255,255,255,0.08)',
-  },
-  tab: {
-    padding: '12px 24px',
-    cursor: 'pointer',
-    border: 'none',
-    background: 'transparent',
-    color: '#888',
-    fontSize: '14px',
-    fontWeight: 500,
-    borderBottom: '2px solid transparent',
-  },
-  tabActive: {
-    color: '#fff',
-    borderBottomColor: '#6366f1',
-  },
-  toolbar: {
-    padding: '12px 24px',
-    background: 'transparent',
-    display: 'flex',
-    gap: '12px',
-    alignItems: 'center',
-    flexWrap: 'wrap' as const,
-  },
-  select: {
-    padding: '8px 12px',
-    background: '#252525',
-    border: '1px solid #333',
-    borderRadius: '6px',
-    color: '#fff',
-    fontSize: '14px',
-    outline: 'none',
-  },
-  searchInput: {
-    flex: 1,
-    padding: '8px 12px',
-    background: '#252525',
-    border: '1px solid #333',
-    borderRadius: '6px',
-    color: '#fff',
-    fontSize: '14px',
-    outline: 'none',
-  },
-  button: {
-    padding: '8px 16px',
-    background: '#333',
-    border: 'none',
-    borderRadius: '6px',
-    color: '#fff',
-    cursor: 'pointer',
-    fontSize: '14px',
-  },
-  buttonDanger: {
-    background: '#7f1d1d',
-  },
-  liveIndicator: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    fontSize: '12px',
-    color: '#22c55e',
-  },
-  liveDot: {
-    width: '8px',
-    height: '8px',
-    background: '#22c55e',
-    borderRadius: '50%',
-    animation: 'pulse 2s infinite',
-  },
-  pill: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '6px 10px',
-    borderRadius: '999px',
-    border: '1px solid #333',
-    background: '#111',
-    fontSize: '12px',
-    color: '#bbb',
-  },
-  badgeOutline: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '4px 10px',
-    borderRadius: '999px',
-    border: '1px solid #333',
-    background: '#0f0f0f',
-    fontSize: '12px',
-    fontWeight: 700,
-    letterSpacing: '0.02em',
-  },
-  badgeView: {
-    borderColor: '#14532d',
-    color: '#4ade80',
-    background: '#052e16',
-  },
-  badgeEdit: {
-    borderColor: '#3730a3',
-    color: '#c7d2fe',
-    background: '#111827',
-  },
-  chip: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '4px 8px',
-    borderRadius: '999px',
-    border: '1px solid #333',
-    background: '#0f0f0f',
-    fontSize: '12px',
-    color: '#ddd',
-  },
-  chipButton: {
-    background: 'transparent',
-    border: 'none',
-    color: '#888',
-    cursor: 'pointer',
-    padding: 0,
-    fontSize: '12px',
-    lineHeight: 1,
-  },
-  filtersPanel: {
-    margin: '0 24px',
-    marginTop: '12px',
-    padding: '14px 16px',
-    borderRadius: '10px',
-    border: '1px solid #333',
-    background: '#121212',
-  },
-  filtersGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-    gap: '12px',
-  },
-  filterCard: {
-    border: '1px solid #2a2a2a',
-    background: '#0f0f0f',
-    borderRadius: '10px',
-    padding: '12px',
-  },
-  filterCardTitle: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-    gap: '10px',
-    marginBottom: '10px',
-    color: '#ddd',
-    fontSize: '12px',
-    fontWeight: 700,
-  },
-  filterHint: {
-    color: '#777',
-    fontSize: '11px',
-    fontWeight: 500,
-    whiteSpace: 'nowrap' as const,
-  },
-  filterValues: {
-    display: 'flex',
-    flexWrap: 'wrap' as const,
-    gap: '8px',
-    alignItems: 'center',
-  },
-  filterInput: {
-    width: '100%',
-    padding: '8px 10px',
-    background: '#151515',
-    border: '1px solid #333',
-    borderRadius: '8px',
-    color: '#fff',
-    fontSize: '13px',
-    outline: 'none',
-  },
-  content: {
-    flex: 1,
-    overflow: 'auto',
-    padding: '16px 24px',
-    background: '#0b0b0b',
-  },
-  table: {
-    width: '100%',
-    borderCollapse: 'collapse' as const,
-  },
-  th: {
-    position: 'sticky' as const,
-    top: 0,
-    zIndex: 5,
-    textAlign: 'left' as const,
-    padding: '12px',
-    borderBottom: '1px solid #333',
-    background: '#0b0b0b',
-    color: '#888',
-    fontSize: '12px',
-    fontWeight: 600,
-    textTransform: 'uppercase' as const,
-  },
-  td: {
-    padding: '12px',
-    borderBottom: '1px solid #222',
-    fontSize: '13px',
-  },
-  row: {
-    cursor: 'pointer',
-    transition: 'background 0.15s',
-  },
-  badge: {
-    display: 'inline-block',
-    padding: '2px 8px',
-    borderRadius: '4px',
-    fontSize: '11px',
-    fontWeight: 600,
-  },
-  badgeSuccess: {
-    background: '#14532d',
-    color: '#4ade80',
-  },
-  badgeError: {
-    background: '#7f1d1d',
-    color: '#fca5a5',
-  },
-  mono: {
-    fontFamily: 'Monaco, Consolas, monospace',
-    fontSize: '12px',
-    color: '#a78bfa',
-  },
-  modal: {
-    position: 'fixed' as const,
-    inset: 0,
-    background: 'rgba(0,0,0,0.8)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '24px',
-    zIndex: 1000,
-  },
-  modalContent: {
-    background: '#1a1a1a',
-    borderRadius: '12px',
-    maxWidth: '1000px',
-    width: '100%',
-    maxHeight: '85vh',
-    overflow: 'hidden',
-    border: '1px solid #333',
-    display: 'flex',
-    flexDirection: 'column' as const,
-  },
-  modalSmallContent: {
-    background: '#1a1a1a',
-    borderRadius: '12px',
-    maxWidth: '520px',
-    width: '100%',
-    maxHeight: '85vh',
-    overflow: 'hidden',
-    border: '1px solid #333',
-    display: 'flex',
-    flexDirection: 'column' as const,
-  },
-  modalHeader: {
-    padding: '16px 24px',
-    borderBottom: '1px solid #333',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
-  modalTitle: {
-    fontSize: '18px',
-    fontWeight: 600,
-    color: '#fff',
-  },
-  modalActions: {
-    display: 'flex',
-    gap: '8px',
-  },
-  modalBody: {
-    padding: '24px',
-    overflow: 'auto',
-    flex: 1,
-  },
-  metaGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '16px',
-    marginBottom: '24px',
-  },
-  metaItem: {
-    background: '#252525',
-    padding: '12px',
-    borderRadius: '8px',
-  },
-  metaLabel: {
-    fontSize: '11px',
-    color: '#888',
-    textTransform: 'uppercase' as const,
-    marginBottom: '4px',
-  },
-  metaValue: {
-    fontSize: '14px',
-    color: '#fff',
-    fontFamily: 'Monaco, Consolas, monospace',
-    wordBreak: 'break-all' as const,
-  },
-  jsonContainer: {
-    background: '#0a0a0a',
-    borderRadius: '8px',
-    overflow: 'hidden',
-  },
-  jsonHeader: {
-    padding: '12px 16px',
-    background: '#151515',
-    borderBottom: '1px solid #333',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  jsonTitle: {
-    fontSize: '12px',
-    fontWeight: 600,
-    color: '#888',
-    textTransform: 'uppercase' as const,
-  },
-  jsonBody: {
-    padding: '16px',
-    overflow: 'auto',
-    maxHeight: '400px',
-  },
-  inspectorTabs: {
-    display: 'flex',
-    gap: '8px',
-    alignItems: 'center',
-  },
-  inspectorTab: {
-    padding: '4px 8px',
-    borderRadius: '6px',
-    border: '1px solid #333',
-    background: '#0f0f0f',
-    color: '#bbb',
-    cursor: 'pointer',
-    fontSize: '11px',
-  },
-  inspectorTabActive: {
-    borderColor: '#6366f1',
-    color: '#fff',
-    background: '#1b1b3a',
-  },
-  split: {
-    display: 'flex',
-    gap: '16px',
-    alignItems: 'stretch',
-  },
-  pane: {
-    flex: 1,
-    minWidth: 0,
-    background: '#141414',
-    border: '1px solid #333',
-    borderRadius: '10px',
-    overflow: 'hidden',
-    display: 'flex',
-    flexDirection: 'column' as const,
-  },
-  paneHeader: {
-    padding: '10px 12px',
-    borderBottom: '1px solid #333',
-    background: '#101010',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: '10px',
-  },
-  paneTitle: {
-    fontSize: '12px',
-    fontWeight: 700,
-    color: '#ddd',
-    textTransform: 'uppercase' as const,
-  },
-  paneBody: {
-    padding: '10px 12px',
-    overflow: 'auto',
-    flex: 1,
-  },
-  treeRow: {
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: '8px',
-    padding: '2px 0',
-    fontFamily: 'Monaco, Consolas, monospace',
-    fontSize: '12px',
-    lineHeight: 1.6,
-    whiteSpace: 'pre' as const,
-  },
-  treeToggle: {
-    width: '18px',
-    background: 'transparent',
-    border: 'none',
-    color: '#888',
-    cursor: 'pointer',
-    padding: 0,
-    textAlign: 'center' as const,
-  },
-  treeKey: {
-    color: '#60a5fa',
-  },
-  treeType: {
-    color: '#888',
-  },
-  treeValueString: {
-    color: '#4ade80',
-  },
-  treeValueNumber: {
-    color: '#a78bfa',
-  },
-  treeValueBool: {
-    color: '#f472b6',
-  },
-  treeValueNull: {
-    color: '#888',
-  },
-  spanRow: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 90px 70px',
-    gap: '10px',
-    alignItems: 'center',
-    padding: '6px 8px',
-    borderRadius: '8px',
-    cursor: 'pointer',
-  },
-  spanRowSelected: {
-    background: '#1b1b3a',
-    border: '1px solid #2f2f68',
-  },
-  spanName: {
-    fontFamily: 'Monaco, Consolas, monospace',
-    fontSize: '12px',
-    color: '#e5e7eb',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
-  },
-  spanMeta: {
-    fontSize: '12px',
-    color: '#999',
-    textAlign: 'right' as const,
-  },
-  barTrack: {
-    height: '6px',
-    background: '#0a0a0a',
-    border: '1px solid #222',
-    borderRadius: '999px',
-    overflow: 'hidden',
-  },
-  barFill: {
-    height: '100%',
-    background: '#6366f1',
-  },
-  dashboardGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(12, 1fr)',
-    gap: '12px',
-    alignItems: 'stretch',
-  },
-  card: {
-    background: '#141414',
-    border: '1px solid #333',
-    borderRadius: '12px',
-    overflow: 'hidden',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    minHeight: 0,
-  },
-  cardHeader: {
-    padding: '10px 12px',
-    borderBottom: '1px solid #333',
-    background: '#101010',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: '10px',
-  },
-  cardTitle: {
-    fontSize: '12px',
-    fontWeight: 700,
-    color: '#e5e7eb',
-    textTransform: 'uppercase' as const,
-  },
-  cardBody: {
-    padding: '12px',
-    flex: 1,
-    overflow: 'auto',
-  },
-  tiny: {
-    fontSize: '11px',
-    color: '#888',
-  },
-  barRow: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 70px',
-    gap: '10px',
-    alignItems: 'center',
-    padding: '6px 0',
-  },
-  barLabel: {
-    fontFamily: 'Monaco, Consolas, monospace',
-    fontSize: '12px',
-    color: '#e5e7eb',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
-  },
-  barValue: {
-    textAlign: 'right' as const,
-    color: '#cbd5e1',
-    fontSize: '12px',
-  },
-  chart: {
-    width: '100%',
-    height: '110px',
-    display: 'block',
-  },
-  empty: {
-    textAlign: 'center' as const,
-    padding: '48px',
-    color: '#666',
-  },
-  copyButton: {
-    padding: '4px 8px',
-    background: '#333',
-    border: 'none',
-    borderRadius: '4px',
-    color: '#888',
-    cursor: 'pointer',
-    fontSize: '11px',
-  },
-  toast: {
-    position: 'fixed' as const,
-    bottom: '24px',
-    right: '24px',
-    background: '#22c55e',
-    color: '#fff',
-    padding: '12px 20px',
-    borderRadius: '8px',
-    fontSize: '14px',
-    zIndex: 2000,
-    animation: 'fadeIn 0.2s ease',
-  },
-};
-
-const DASHBOARD_COLS = 12;
-const DASHBOARD_ROW_HEIGHT = 84;
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
-function defaultWidgetLayout(widget: WidgetSpec): { w: number; h: number } {
-  if (widget.type === 'stat') return { w: 3, h: 1 };
-  if (widget.type === 'timeseries') return { w: 6, h: 2 };
-  return { w: 6, h: 2 };
-}
-
-type Rect = { x: number; y: number; w: number; h: number };
-
-function rectsOverlap(a: Rect, b: Rect): boolean {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
-function findFirstFit(placed: Rect[], cols: number, w: number, h: number, startY = 0): { x: number; y: number } {
-  const safeW = Math.max(1, Math.min(cols, w));
-  const safeH = Math.max(1, h);
-  const maxY = Math.max(startY, ...placed.map((r) => r.y + r.h), 0) + 200;
-  for (let y = Math.max(0, startY); y <= maxY; y += 1) {
-    for (let x = 0; x <= cols - safeW; x += 1) {
-      const candidate: Rect = { x, y, w: safeW, h: safeH };
-      if (!placed.some((r) => rectsOverlap(r, candidate))) return { x, y };
-    }
-  }
-  return { x: 0, y: maxY + 1 };
-}
-
-function normalizeDashboardSpec(spec: DashboardSpecV1, cols = DASHBOARD_COLS): DashboardSpecV1 {
-  const placed: Rect[] = [];
-  const widgets = spec.widgets.map((widget) => {
-    const defaults = defaultWidgetLayout(widget);
-    const raw = widget.layout ?? ({} as any);
-    const w = clampInt(raw.w, 1, cols, defaults.w);
-    const h = clampInt(raw.h, 1, 50, defaults.h);
-
-    const hasX = raw.x !== undefined && Number.isFinite(Number(raw.x));
-    const hasY = raw.y !== undefined && Number.isFinite(Number(raw.y));
-    const x0 = hasX ? clampInt(raw.x, 0, Math.max(0, cols - 1), 0) : 0;
-    const y0 = hasY ? clampInt(raw.y, 0, 100_000, 0) : 0;
-    const x = Math.min(x0, Math.max(0, cols - w));
-    const y = y0;
-
-    const candidate: Rect = { x, y, w, h };
-    const needsReflow =
-      !hasX ||
-      !hasY ||
-      candidate.x + candidate.w > cols ||
-      placed.some((r) => rectsOverlap(r, candidate));
-
-    const pos = needsReflow ? findFirstFit(placed, cols, w, h, hasY ? y : 0) : { x, y };
-    const rect: Rect = { x: pos.x, y: pos.y, w, h };
-    placed.push(rect);
-
-    return { ...widget, layout: { x: rect.x, y: rect.y, w: rect.w, h: rect.h } } as WidgetSpec;
-  });
-
-  return { ...spec, widgets };
-}
-
-function addPlacedWidget(existing: WidgetSpec[], widget: WidgetSpec, cols = DASHBOARD_COLS): WidgetSpec {
-  const base = normalizeDashboardSpec(
-    { version: 1, name: '', sampleSize: 100, bucketSeconds: 60, widgets: existing },
-    cols
-  );
-  const placed: Rect[] = base.widgets
-    .map((w) => w.layout)
-    .filter(Boolean)
-    .map((l: any) => ({ x: l.x ?? 0, y: l.y ?? 0, w: l.w ?? 6, h: l.h ?? 2 }));
-
-  const defaults = defaultWidgetLayout(widget);
-  const w = clampInt(widget.layout?.w, 1, cols, defaults.w);
-  const h = clampInt(widget.layout?.h, 1, 50, defaults.h);
-  const pos = findFirstFit(placed, cols, w, h, Math.max(0, ...placed.map((r) => r.y + r.h), 0));
-  return { ...widget, layout: { ...(widget.layout ?? {}), x: pos.x, y: pos.y, w, h } } as WidgetSpec;
-}
-
-function formatTime(timestamp: number | undefined | null): string {
-  if (!timestamp || isNaN(timestamp)) return '-';
-  const date = new Date(timestamp);
-  if (isNaN(date.getTime())) return '-';
-  return date.toLocaleTimeString();
-}
-
-function formatDuration(ms: number | null): string {
-  if (ms === null || ms === undefined) return '-';
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
-}
-
-function formatNumber(n: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n);
-}
-
-function truncate(str: string | null | undefined, len: number): string {
-  if (!str) return '-';
-  if (str.length <= len) return str;
-  return str.slice(0, len) + '...';
-}
-
-function getTraceTime(trace: Trace): number {
-  return trace.created_at || trace.start_time || Date.now();
-}
-
-function getEventTime(event: WideEvent): number {
-  return event.created_at || Date.now();
-}
-
-type FilterOp = 'in' | 'contains';
-type FilterState = Record<string, { op: FilterOp; values: string[] }>;
-type SetStateAction<T> = T | ((prev: T) => T);
-type FilterSetter = (action: SetStateAction<FilterState>) => void;
-
-function normalizeFilterKey(tab: Tab, key: string): string {
-  if (tab === 'events') {
-    switch (key) {
-      case 'service.name':
-        return 'service_name';
-      case 'graphql.operation_type':
-        return 'operation_type';
-      case 'graphql.field_name':
-        return 'field_name';
-      case 'duration.total_ms':
-        return 'duration_ms';
-      case 'user.id':
-        return 'user_id';
-      case 'count.rpc_calls':
-        return 'rpc_call_count';
-      default:
-        return key;
-    }
-  }
-  return key;
-}
-
-function safeJsonParse(value: string | null | undefined): unknown {
-  if (!value) return {};
-  try {
-    return JSON.parse(value);
-  } catch {
-    return {};
-  }
-}
-
-function isPrimitive(value: unknown): value is string | number | boolean | null {
-  return (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  );
-}
-
-function getFieldValue(tab: Tab, item: Trace | WideEvent, key: string, parsedAttributes?: Record<string, unknown>): unknown {
-  const normalized = normalizeFilterKey(tab, key);
-  const direct = (item as any)[normalized];
-  if (direct !== undefined && direct !== null) return direct;
-
-  const attrs = parsedAttributes ?? (safeJsonParse((item as any).attributes) as Record<string, unknown>);
-  if (attrs && typeof attrs === 'object') {
-    if (Object.prototype.hasOwnProperty.call(attrs, key)) return (attrs as any)[key];
-    if (Object.prototype.hasOwnProperty.call(attrs, normalized)) return (attrs as any)[normalized];
-    if (normalized.includes('.')) {
-      const parts = normalized.split('.');
-      let cur: any = attrs;
-      for (const part of parts) {
-        if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, part)) {
-          cur = cur[part];
-        } else {
-          cur = undefined;
-          break;
-        }
-      }
-      return cur;
-    }
-  }
-
-  return undefined;
-}
-
-function toComparableString(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  return '';
-}
-
-function applyFilters<T extends Trace | WideEvent>(
-  tab: Tab,
-  items: T[],
-  filters: FilterState,
-  searchText: string
-): T[] {
-  const search = searchText.trim().toLowerCase();
-
-  const activeFilters = Object.entries(filters).filter(([, f]) => f.values.length > 0);
-  if (!search && activeFilters.length === 0) return items;
-
-  return items.filter((item) => {
-    const attrs = safeJsonParse(item.attributes) as Record<string, unknown>;
-
-    if (search) {
-      const haystack = [
-        (item as any).trace_id,
-        (item as any).service_name,
-        (item as any).operation_name,
-        (item as any).operation_type,
-        (item as any).field_name,
-        (item as any).user_id,
-        item.attributes,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-      if (!haystack.includes(search)) return false;
-    }
-
-    for (const [key, filter] of activeFilters) {
-      const value = getFieldValue(tab, item, key, attrs);
-      const str = toComparableString(value);
-      if (!str) return false;
-
-      if (filter.op === 'in') {
-        if (!filter.values.includes(str)) return false;
-      } else if (filter.op === 'contains') {
-        const lower = str.toLowerCase();
-        const ok = filter.values.some((needle) => lower.includes(needle.toLowerCase()));
-        if (!ok) return false;
-      }
-    }
-
-    return true;
-  });
-}
-
-type FieldStats = {
-  key: string;
-  count: number;
-  distinct: number;
-  valuesTop: Array<{ value: string; count: number }>;
-  highCardinality: boolean;
-};
-
-function computeFieldStats(tab: Tab, items: Array<Trace | WideEvent>, extraKeys: string[] = []): FieldStats[] {
-  const stats = new Map<string, { count: number; values: Map<string, number> }>();
-  const forcedKeys = new Set(extraKeys.map((k) => normalizeFilterKey(tab, k)));
-
-  const bump = (key: string, rawValue: unknown) => {
-    if (!isPrimitive(rawValue)) return;
-    const value = toComparableString(rawValue);
-    if (!value) return;
-    const normalizedKey = normalizeFilterKey(tab, key);
-    const entry = stats.get(normalizedKey) ?? { count: 0, values: new Map<string, number>() };
-    entry.count += 1;
-    entry.values.set(value, (entry.values.get(value) ?? 0) + 1);
-    stats.set(normalizedKey, entry);
-  };
-
-  const knownKeys =
-    tab === 'events'
-      ? ['service_name', 'outcome', 'operation_type', 'field_name', 'user_id']
-      : ['service_name', 'status', 'operation_name'];
-
-  for (const key of [...knownKeys, ...extraKeys]) {
-    stats.set(key, { count: 0, values: new Map<string, number>() });
-  }
-
-  for (const item of items) {
-    const attrs = safeJsonParse(item.attributes) as Record<string, unknown>;
-
-    for (const key of knownKeys) {
-      bump(key, (item as any)[key]);
-    }
-
-    if (attrs && typeof attrs === 'object') {
-      for (const [k, v] of Object.entries(attrs)) {
-        bump(k, v);
-      }
-    }
-  }
-
-  const result: FieldStats[] = [];
-  for (const [key, entry] of stats.entries()) {
-    const distinct = entry.values.size;
-    if (distinct < 2 && !forcedKeys.has(key)) continue;
-
-    const valuesTop = [...entry.values.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 12)
-      .map(([value, count]) => ({ value, count }));
-
-    result.push({
-      key,
-      count: entry.count,
-      distinct,
-      valuesTop,
-      highCardinality: distinct > 50,
-    });
-  }
-
-  // Prefer keys seen often, with manageable cardinality first
-  return result.sort((a, b) => {
-    if (a.highCardinality !== b.highCardinality) return a.highCardinality ? 1 : -1;
-    if (a.distinct !== b.distinct) return a.distinct - b.distinct;
-    return b.count - a.count;
-  });
-}
-
-// Try to parse JSON strings recursively
-function smartParseJson(data: unknown): unknown {
-  if (typeof data === 'string') {
-    // Try to parse if it looks like JSON
-    if (
-      (data.startsWith('{') && data.endsWith('}')) ||
-      (data.startsWith('[') && data.endsWith(']'))
-    ) {
-      try {
-        const parsed = JSON.parse(data);
-        return smartParseJson(parsed); // Recursively parse nested JSON strings
-      } catch {
-        return data; // Return original string if parsing fails
-      }
-    }
-    return data;
-  }
-
-  if (Array.isArray(data)) {
-    return data.map(smartParseJson);
-  }
-
-  if (data !== null && typeof data === 'object') {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(data)) {
-      result[key] = smartParseJson(value);
-    }
-    return result;
-  }
-
-  return data;
-}
-
-function JsonView({ data, title }: { data: unknown; title: string }) {
-  const [copied, setCopied] = useState(false);
-  const [mode, setMode] = useState<'tree' | 'raw'>('tree');
-  const [query, setQuery] = useState('');
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['$']));
-
-  const parsedData = smartParseJson(data);
-  const jsonString = JSON.stringify(parsedData, null, 2);
-
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(jsonString);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const matches = (text: string) => {
-    const q = query.trim().toLowerCase();
-    if (!q) return false;
-    return text.toLowerCase().includes(q);
-  };
-
-  const joinPath = (parent: string, segment: string) => `${parent}/${encodeURIComponent(segment)}`;
-
-  const togglePath = (path: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  };
-
-  const collapseAll = () => setExpanded(new Set(['$']));
-
-  const expandAll = () => {
-    const next = new Set<string>();
-    const stack: Array<{ value: unknown; path: string }> = [{ value: parsedData, path: '$' }];
-    let seen = 0;
-
-    while (stack.length) {
-      const { value, path } = stack.pop()!;
-      next.add(path);
-      if (seen++ > 5000) break;
-
-      if (value && typeof value === 'object') {
-        if (Array.isArray(value)) {
-          value.forEach((v, i) => stack.push({ value: v, path: joinPath(path, String(i)) }));
-        } else {
-          for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-            stack.push({ value: v, path: joinPath(path, k) });
-          }
-        }
-      }
-    }
-
-    setExpanded(next);
-  };
-
-  const renderValue = (value: unknown) => {
-    if (value === null) return <span style={styles.treeValueNull}>null</span>;
-    if (typeof value === 'string') return <span style={styles.treeValueString}>"{value}"</span>;
-    if (typeof value === 'number') return <span style={styles.treeValueNumber}>{value}</span>;
-    if (typeof value === 'boolean') return <span style={styles.treeValueBool}>{String(value)}</span>;
-    if (Array.isArray(value)) return <span style={styles.treeType}>Array({value.length})</span>;
-    if (value && typeof value === 'object') return <span style={styles.treeType}>Object</span>;
-    return <span style={styles.treeValueNull}>-</span>;
-  };
-
-  const renderNode = (value: unknown, path: string, depth: number, label?: string): ReactNode[] => {
-    const indent = '  '.repeat(depth);
-    const isExpandable = !!value && typeof value === 'object';
-    const isOpen = expanded.has(path);
-
-    const labelText = label ?? '$';
-    const labelHighlight = matches(labelText) ? { background: '#2a2a00', borderRadius: '4px', padding: '0 2px' } : {};
-
-    const rows: ReactNode[] = [];
-
-    rows.push(
-      <div key={path} style={styles.treeRow}>
-        <span style={{ color: '#666' }}>{indent}</span>
-        {isExpandable ? (
-          <button style={styles.treeToggle} onClick={() => togglePath(path)} aria-label={isOpen ? 'Collapse' : 'Expand'}>
-            {isOpen ? '▾' : '▸'}
-          </button>
-        ) : (
-          <span style={{ ...styles.treeToggle, cursor: 'default' }}> </span>
-        )}
-        <span style={{ ...styles.treeKey, ...labelHighlight }}>{labelText}</span>
-        <span style={{ color: '#777' }}>:</span>
-        <span style={matches(toComparableString(value)) ? { background: '#2a2a00', borderRadius: '4px', padding: '0 2px' } : {}}>
-          {renderValue(value)}
-        </span>
-      </div>
-    );
-
-    if (!isExpandable || !isOpen) return rows;
-
-    if (Array.isArray(value)) {
-      value.forEach((child, i) => {
-        rows.push(...renderNode(child, joinPath(path, String(i)), depth + 1, `[${i}]`));
-      });
-      return rows;
-    }
-
-    const entries = Object.entries(value as Record<string, unknown>);
-    entries.forEach(([k, v]) => {
-      rows.push(...renderNode(v, joinPath(path, k), depth + 1, k));
-    });
-    return rows;
-  };
-
-  return (
-    <div style={styles.jsonContainer}>
-      <div style={styles.jsonHeader}>
-        <span style={styles.jsonTitle}>{title}</span>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <div style={styles.inspectorTabs}>
-            <button
-              style={{ ...styles.inspectorTab, ...(mode === 'tree' ? styles.inspectorTabActive : {}) }}
-              onClick={() => setMode('tree')}
-            >
-              Tree
-            </button>
-            <button
-              style={{ ...styles.inspectorTab, ...(mode === 'raw' ? styles.inspectorTabActive : {}) }}
-              onClick={() => setMode('raw')}
-            >
-              Raw
-            </button>
-          </div>
-          {mode === 'tree' && (
-            <>
-              <input
-                style={{ ...styles.copyButton, width: '160px', textAlign: 'left' as const, cursor: 'text' }}
-                placeholder="Find…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-              <button style={styles.copyButton} onClick={expandAll} title="Expand all">
-                Expand
-              </button>
-              <button style={styles.copyButton} onClick={collapseAll} title="Collapse all">
-                Collapse
-              </button>
-            </>
-          )}
-          <button style={styles.copyButton} onClick={handleCopy}>
-            {copied ? 'Copied!' : 'Copy'}
-          </button>
-        </div>
-      </div>
-      <div style={styles.jsonBody}>
-        {mode === 'raw' ? (
-          <pre
-            style={{
-              margin: 0,
-              fontFamily: 'Monaco, Consolas, monospace',
-              fontSize: '12px',
-              lineHeight: 1.6,
-              color: '#e0e0e0',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {jsonString}
-          </pre>
-        ) : (
-          <div>{renderNode(parsedData, '$', 0)}</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-type Selected =
-  | { type: 'event'; event: WideEvent }
-  | { type: 'trace'; traceId: string; focusSpanId?: string };
-
-function buildAttributePairs(attributes: Record<string, unknown>) {
-  const pairs: Array<{ key: string; value: string; group: string }> = [];
-  for (const [key, raw] of Object.entries(attributes)) {
-    if (!isPrimitive(raw)) continue;
-    const value = String(raw);
-    if (!value) continue;
-    const group = key.includes('.') ? key.split('.')[0] : 'attributes';
-    pairs.push({ key, value, group });
-  }
-  return pairs.sort((a, b) => a.group.localeCompare(b.group) || a.key.localeCompare(b.key));
-}
-
-function EventDetailModal({
-  event,
-  onClose,
-  onOpenTrace,
-}: {
-  event: WideEvent;
-  onClose: () => void;
-  onOpenTrace: (traceId: string) => void;
-}) {
-  const [toast, setToast] = useState<string | null>(null);
-  const [showAllAttrs, setShowAllAttrs] = useState(false);
-
-  const showToast = (message: string) => {
-    setToast(message);
-    setTimeout(() => setToast(null), 2000);
-  };
-
-  const copyToClipboard = async (text: string, label: string) => {
-    await navigator.clipboard.writeText(text);
-    showToast(`${label} copied!`);
-  };
-
-  const traceId = event.trace_id || '-';
-  const attributes = safeJsonParse(event.attributes) as Record<string, unknown>;
-  const pairs = buildAttributePairs(attributes);
-  const shownPairs = showAllAttrs ? pairs : pairs.slice(0, 28);
-
-  return (
-    <div style={styles.modal} onClick={onClose}>
-      <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.modalHeader}>
-          <span style={styles.modalTitle}>Wide Event</span>
-          <div style={styles.modalActions}>
-            {event.trace_id && (
-              <button style={styles.copyButton} onClick={() => onOpenTrace(event.trace_id!)}>
-                Open Trace
-              </button>
-            )}
-            <button style={styles.copyButton} onClick={() => copyToClipboard(traceId, 'Trace ID')}>
-              Copy Trace ID
-            </button>
-            <button style={styles.copyButton} onClick={() => copyToClipboard(JSON.stringify(event, null, 2), 'Full JSON')}>
-              Copy All
-            </button>
-            <button style={styles.button} onClick={onClose}>
-              Close
-            </button>
-          </div>
-        </div>
-
-        <div style={styles.modalBody}>
-          <div style={styles.metaGrid}>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>Trace ID</div>
-              <div style={styles.metaValue}>{traceId}</div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>Service</div>
-              <div style={styles.metaValue}>{event.service_name}</div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>Operation</div>
-              <div style={styles.metaValue}>
-                {event.operation_type}:{event.field_name}
-              </div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>Outcome</div>
-              <div style={styles.metaValue}>
-                <span
-                  style={{
-                    ...styles.badge,
-                    ...(event.outcome === 'error' ? styles.badgeError : styles.badgeSuccess),
-                  }}
-                >
-                  {event.outcome}
-                </span>
-              </div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>Duration</div>
-              <div style={styles.metaValue}>{formatDuration(event.duration_ms)}</div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>User ID</div>
-              <div style={styles.metaValue}>{event.user_id || '-'}</div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>RPC Calls</div>
-              <div style={styles.metaValue}>{event.rpc_call_count}</div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>Errors</div>
-              <div style={styles.metaValue}>{event.error_count}</div>
-            </div>
-            <div style={styles.metaItem}>
-              <div style={styles.metaLabel}>Time</div>
-              <div style={styles.metaValue}>{new Date(getEventTime(event)).toLocaleString()}</div>
-            </div>
-          </div>
-
-          <div style={{ ...styles.pane, marginBottom: '16px' }}>
-            <div style={styles.paneHeader}>
-              <span style={styles.paneTitle}>Key Attributes</span>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span style={{ color: '#777', fontSize: '12px' }}>
-                  {shownPairs.length}/{pairs.length}
-                </span>
-                {pairs.length > 28 && (
-                  <button style={styles.copyButton} onClick={() => setShowAllAttrs(!showAllAttrs)}>
-                    {showAllAttrs ? 'Show less' : 'Show all'}
-                  </button>
-                )}
-              </div>
-            </div>
-            <div style={styles.paneBody}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                {shownPairs.map(({ key, value, group }) => (
-                  <div key={key} style={{ background: '#0f0f0f', border: '1px solid #2a2a2a', borderRadius: '10px', padding: '10px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', marginBottom: '6px' }}>
-                      <span style={{ ...styles.mono, color: '#60a5fa' }}>{key}</span>
-                      <span style={{ color: '#666', fontSize: '11px' }}>{group}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'baseline' }}>
-                      <span style={{ ...styles.mono, color: '#e5e7eb', wordBreak: 'break-all' as const }}>
-                        {truncate(value, 160)}
-                      </span>
-                      <button style={styles.copyButton} onClick={() => copyToClipboard(value, key)}>
-                        Copy
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <JsonView data={attributes} title="Attributes (JSON)" />
-        </div>
-      </div>
-
-      {toast && <div style={styles.toast}>{toast}</div>}
-    </div>
-  );
-}
-
-function TraceDetailModal({
-  traceId,
-  dropId,
-  focusSpanId,
-  onClose,
-}: {
-  traceId: string;
-  dropId: number;
-  focusSpanId?: string;
-  onClose: () => void;
-}) {
-  const [toast, setToast] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [spans, setSpans] = useState<Trace[]>([]);
-  const [events, setEvents] = useState<WideEvent[]>([]);
-  const [selectedSpanId, setSelectedSpanId] = useState<string | null>(focusSpanId ?? null);
-  const [selectedEventId, setSelectedEventId] = useState<number | null>(null);
-
-  const showToast = (message: string) => {
-    setToast(message);
-    setTimeout(() => setToast(null), 2000);
-  };
-
-  const copyToClipboard = async (text: string, label: string) => {
-    await navigator.clipboard.writeText(text);
-    showToast(`${label} copied!`);
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setSelectedEventId(null);
-
-    fetch(`/api/traces/${encodeURIComponent(traceId)}?dropId=${dropId}`)
-      .then(async (res) => {
-        if (!res.ok) throw new Error('Failed to load trace');
-        return (await res.json()) as { spans: Trace[]; events: WideEvent[] };
-      })
-      .then((data) => {
-        if (cancelled) return;
-        setSpans(data.spans ?? []);
-        setEvents(data.events ?? []);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setError((e as Error).message);
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [traceId, dropId]);
-
-  useEffect(() => {
-    if (selectedSpanId) return;
-    if (!spans.length) return;
-    setSelectedSpanId(focusSpanId ?? spans[0].span_id);
-  }, [spans, selectedSpanId, focusSpanId]);
-
-  const spanById = new Map(spans.map((s) => [s.span_id, s]));
-  const childrenByParent = new Map<string | null, Trace[]>();
-  for (const s of spans) {
-    const parent = s.parent_span_id ?? null;
-    const arr = childrenByParent.get(parent) ?? [];
-    arr.push(s);
-    childrenByParent.set(parent, arr);
-  }
-  for (const arr of childrenByParent.values()) {
-    arr.sort((a, b) => (a.start_time ?? 0) - (b.start_time ?? 0));
-  }
-
-  const selectedSpan = selectedSpanId ? spanById.get(selectedSpanId) : undefined;
-  const selectedEvent = selectedEventId ? events.find((e) => e.id === selectedEventId) : undefined;
-
-  const traceStart = spans.length ? Math.min(...spans.map((s) => s.start_time || Date.now())) : Date.now();
-  const traceEnd = spans.length
-    ? Math.max(
-        ...spans.map((s) => {
-          if (s.end_time) return s.end_time;
-          if (s.duration_ms !== null && s.duration_ms !== undefined) return s.start_time + s.duration_ms;
-          return s.start_time;
-        })
-      )
-    : traceStart;
-  const traceDuration = Math.max(1, traceEnd - traceStart);
-  const errorSpans = spans.filter((s) => s.status === 'error').length;
-  const services = Array.from(new Set(spans.map((s) => s.service_name).filter(Boolean))).sort();
-
-  const renderSpanTree = (parent: string | null, depth: number): ReactNode[] => {
-    const nodes = childrenByParent.get(parent) ?? [];
-    const out: ReactNode[] = [];
-    for (const s of nodes) {
-      const start = s.start_time ?? traceStart;
-      const end =
-        s.end_time ?? (s.duration_ms !== null && s.duration_ms !== undefined ? start + s.duration_ms : start);
-      const leftPct = ((start - traceStart) / traceDuration) * 100;
-      const widthPct = (Math.max(1, end - start) / traceDuration) * 100;
-      const isSelected = s.span_id === selectedSpanId;
-
-      out.push(
-        <div
-          key={s.span_id}
-          style={{
-            ...styles.spanRow,
-            ...(isSelected ? styles.spanRowSelected : {}),
-            background: isSelected ? (styles.spanRowSelected as any).background : 'transparent',
-          }}
-          onClick={() => setSelectedSpanId(s.span_id)}
-        >
-          <div style={{ minWidth: 0 }}>
-            <div style={styles.spanName}>
-              <span style={{ color: '#666' }}>{'  '.repeat(depth)}</span>
-              {s.operation_name}
-            </div>
-            <div style={{ marginTop: '6px' }}>
-              <div style={styles.barTrack}>
-                <div style={{ ...styles.barFill, width: `${widthPct}%`, marginLeft: `${leftPct}%`, background: s.status === 'error' ? '#ef4444' : '#6366f1' }} />
-              </div>
-            </div>
-          </div>
-          <div style={styles.spanMeta}>{formatDuration(s.duration_ms)}</div>
-          <div style={styles.spanMeta}>
-            <span
-              style={{
-                ...styles.badge,
-                ...(s.status === 'error' ? styles.badgeError : styles.badgeSuccess),
-              }}
-            >
-              {s.status}
-            </span>
-          </div>
-        </div>
-      );
-
-      out.push(...renderSpanTree(s.span_id, depth + 1));
-    }
-    return out;
-  };
-
-  return (
-    <div style={styles.modal} onClick={onClose}>
-      <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.modalHeader}>
-          <span style={styles.modalTitle}>Trace</span>
-          <div style={styles.modalActions}>
-            <button style={styles.copyButton} onClick={() => copyToClipboard(traceId, 'Trace ID')}>
-              Copy Trace ID
-            </button>
-            <button style={styles.button} onClick={onClose}>
-              Close
-            </button>
-          </div>
-        </div>
-
-        <div style={styles.modalBody}>
-          {loading ? (
-            <div style={styles.empty}>Loading trace…</div>
-          ) : error ? (
-            <div style={styles.empty}>{error}</div>
-          ) : spans.length === 0 ? (
-            <div style={styles.empty}>No spans found for this trace.</div>
-          ) : (
-            <>
-              <div style={styles.metaGrid}>
-                <div style={styles.metaItem}>
-                  <div style={styles.metaLabel}>Trace ID</div>
-                  <div style={styles.metaValue}>{traceId}</div>
-                </div>
-                <div style={styles.metaItem}>
-                  <div style={styles.metaLabel}>Spans</div>
-                  <div style={styles.metaValue}>{spans.length}</div>
-                </div>
-                <div style={styles.metaItem}>
-                  <div style={styles.metaLabel}>Duration</div>
-                  <div style={styles.metaValue}>{formatDuration(traceDuration)}</div>
-                </div>
-                <div style={styles.metaItem}>
-                  <div style={styles.metaLabel}>Errors</div>
-                  <div style={styles.metaValue}>{errorSpans}</div>
-                </div>
-                <div style={styles.metaItem}>
-                  <div style={styles.metaLabel}>Services</div>
-                  <div style={styles.metaValue}>{services.join(', ') || '-'}</div>
-                </div>
-                <div style={styles.metaItem}>
-                  <div style={styles.metaLabel}>Start</div>
-                  <div style={styles.metaValue}>{new Date(traceStart).toLocaleString()}</div>
-                </div>
-              </div>
-
-              <div style={styles.split}>
-                <div style={{ ...styles.pane, flex: 1.2 }}>
-                  <div style={styles.paneHeader}>
-                    <span style={styles.paneTitle}>Span Tree</span>
-                    <span style={{ color: '#777', fontSize: '12px' }}>Click a span to inspect</span>
-                  </div>
-                  <div style={styles.paneBody}>{renderSpanTree(null, 0)}</div>
-                </div>
-
-                <div style={{ ...styles.pane, flex: 1 }}>
-                  <div style={styles.paneHeader}>
-                    <span style={styles.paneTitle}>Selection</span>
-                    {selectedSpan && (
-                      <button style={styles.copyButton} onClick={() => copyToClipboard(selectedSpan.span_id, 'Span ID')}>
-                        Copy Span ID
-                      </button>
-                    )}
-                  </div>
-                  <div style={styles.paneBody}>
-                    {selectedSpan ? (
-                      <>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
-                          <div style={styles.metaItem}>
-                            <div style={styles.metaLabel}>Service</div>
-                            <div style={styles.metaValue}>{selectedSpan.service_name}</div>
-                          </div>
-                          <div style={styles.metaItem}>
-                            <div style={styles.metaLabel}>Operation</div>
-                            <div style={styles.metaValue}>{selectedSpan.operation_name}</div>
-                          </div>
-                          <div style={styles.metaItem}>
-                            <div style={styles.metaLabel}>Span ID</div>
-                            <div style={styles.metaValue}>{selectedSpan.span_id}</div>
-                          </div>
-                          <div style={styles.metaItem}>
-                            <div style={styles.metaLabel}>Parent</div>
-                            <div style={styles.metaValue}>{selectedSpan.parent_span_id || '-'}</div>
-                          </div>
-                          <div style={styles.metaItem}>
-                            <div style={styles.metaLabel}>Duration</div>
-                            <div style={styles.metaValue}>{formatDuration(selectedSpan.duration_ms)}</div>
-                          </div>
-                          <div style={styles.metaItem}>
-                            <div style={styles.metaLabel}>Status</div>
-                            <div style={styles.metaValue}>{selectedSpan.status}</div>
-                          </div>
-                        </div>
-
-                        <JsonView data={safeJsonParse(selectedSpan.attributes)} title="Span Attributes (JSON)" />
-                      </>
-                    ) : (
-                      <div style={{ color: '#888' }}>Select a span to inspect.</div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {events.length > 0 && (
-                <div style={{ marginTop: '16px' }}>
-                  <div style={{ ...styles.pane, marginBottom: '12px' }}>
-                    <div style={styles.paneHeader}>
-                      <span style={styles.paneTitle}>Related Wide Events</span>
-                      <span style={{ color: '#777', fontSize: '12px' }}>Click an event to view JSON</span>
-                    </div>
-                    <div style={styles.paneBody}>
-                      <table style={styles.table}>
-                        <thead>
-                          <tr>
-                            <th style={styles.th}>Time</th>
-                            <th style={styles.th}>Service</th>
-                            <th style={styles.th}>Operation</th>
-                            <th style={styles.th}>Outcome</th>
-                            <th style={styles.th}>Duration</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {events.map((e) => (
-                            <tr key={e.id} style={styles.row} onClick={() => setSelectedEventId(e.id)}>
-                              <td style={styles.td}>{formatTime(getEventTime(e))}</td>
-                              <td style={styles.td}>{e.service_name}</td>
-                              <td style={styles.td}>
-                                {e.operation_type}:{e.field_name}
-                              </td>
-                              <td style={styles.td}>
-                                <span
-                                  style={{
-                                    ...styles.badge,
-                                    ...(e.outcome === 'error' ? styles.badgeError : styles.badgeSuccess),
-                                  }}
-                                >
-                                  {e.outcome}
-                                </span>
-                              </td>
-                              <td style={styles.td}>{formatDuration(e.duration_ms)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {selectedEvent && (
-                    <JsonView data={safeJsonParse(selectedEvent.attributes)} title="Selected Event Attributes (JSON)" />
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-
-      {toast && <div style={styles.toast}>{toast}</div>}
-    </div>
-  );
-}
 
 export default function App() {
   type SettingsTab = 'account' | 'drops' | 'service_accounts' | 'auth' | 'users' | 'integrations';
@@ -1689,7 +43,6 @@ export default function App() {
 
   const initialSettingsTab: SettingsTab =
     parseSettingsTab(new URLSearchParams(window.location.search).get('settings')) ?? 'account';
-
   const initialDropRaw = new URLSearchParams(window.location.search).get('drop');
   const initialDropId = initialDropRaw && /^\d+$/.test(initialDropRaw) ? Number.parseInt(initialDropRaw, 10) : null;
 
@@ -1702,6 +55,7 @@ export default function App() {
   const [authAllowlistSummary, setAuthAllowlistSummary] = useState<{ enabled: boolean; domains_count: number; emails_count: number } | null>(null);
   const [authBaseUrlSet, setAuthBaseUrlSet] = useState(false);
   const [authTrustedOriginsSet, setAuthTrustedOriginsSet] = useState(false);
+  const [unauthAdminEnabled, setUnauthAdminEnabled] = useState(false);
   const [authUser, setAuthUser] = useState<{ id: string; email: string; role: 'admin' | 'member' } | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -1777,6 +131,8 @@ export default function App() {
   const [defaultDropId, setDefaultDropId] = useState<number | null>(null);
   const [dropId, setDropId] = useState<number | null>(initialDropId);
   const dropIdRef = useRef<number | null>(null);
+  const dataRequestSeqRef = useRef(0);
+  const dashboardRequestSeqRef = useRef(0);
   const [showFilters, setShowFilters] = useState(false);
   const [eventFilters, setEventFilters] = useState<FilterState>({});
   const [traceFilters, setTraceFilters] = useState<FilterState>({});
@@ -1813,9 +169,11 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const pausedRef = useRef(false);
   const authActive = authEnabled === true;
   const authReady = authEnabled === false || authUser !== null;
   const isAdmin = authUser?.role === 'admin';
+  const canManageDashboards = authActive ? isAdmin : unauthAdminEnabled;
   const isMember = authActive && !isAdmin;
   const dataLocked =
     authActive &&
@@ -1884,15 +242,14 @@ export default function App() {
     window.localStorage.setItem('raphael.dashboardMode', dashboardMode);
   }, [dashboardMode]);
 
+  useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+
   const fetchAuthMe = useCallback(async () => {
     if (!authEnabled) return;
     try {
-      const res = await fetch('/api/admin/me');
-      if (!res.ok) {
-        setAuthUser(null);
-        return;
-      }
-      const json = (await res.json()) as { user?: { id: string; email: string; role: 'admin' | 'member' } };
+      const json = await fetchJson<{ user?: { id: string; email: string; role: 'admin' | 'member' } }>('/api/admin/me');
       setAuthUser(json.user ?? null);
     } catch (error) {
       console.error('Failed to fetch auth session:', error);
@@ -1904,16 +261,16 @@ export default function App() {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch('/api/auth/config');
-        const json = (await res.json()) as {
+        const json = await fetchJson<{
           enabled?: boolean;
           mode?: 'disabled' | 'oauth_only' | 'password_only' | 'hybrid';
           email_password_enabled?: boolean;
           providers?: Array<{ id: string; label: string }>;
           oauth_allowlist?: { enabled: boolean; domains_count: number; emails_count: number };
+          unauthenticated_admin_enabled?: boolean;
           base_url_set?: boolean;
           trusted_origins_set?: boolean;
-        };
+        }>('/api/auth/config');
         if (cancelled) return;
         const enabled = Boolean(json?.enabled);
         setAuthEnabled(enabled);
@@ -1921,6 +278,7 @@ export default function App() {
         setAuthEmailPasswordEnabled(Boolean(json?.email_password_enabled));
         setAuthProviders(json?.providers ?? []);
         setAuthAllowlistSummary(json?.oauth_allowlist ?? null);
+        setUnauthAdminEnabled(Boolean(json?.unauthenticated_admin_enabled));
         setAuthBaseUrlSet(Boolean(json?.base_url_set));
         setAuthTrustedOriginsSet(Boolean(json?.trusted_origins_set));
         setAuthError(null);
@@ -1961,50 +319,69 @@ export default function App() {
   const fetchData = useCallback(async () => {
     if (!authReady) return;
     if (dataLocked) return;
-    if (dropIdRef.current === null) return;
+    const activeDropId = dropIdRef.current;
+    if (activeDropId === null) return;
+    const seq = ++dataRequestSeqRef.current;
     setListLoading(true);
     try {
-      const [tracesRes, eventsRes, statsRes] = await Promise.all([
-        fetch(`/api/traces?dropId=${dropIdRef.current}&limit=${LIST_PAGE_SIZE}&envelope=1`),
-        fetch(`/api/events?dropId=${dropIdRef.current}&limit=${LIST_PAGE_SIZE}&envelope=1`),
-        fetch(`/api/stats?dropId=${dropIdRef.current}`),
+      const [tracesJson, eventsJson, nextStats] = await Promise.all([
+        fetchJson<{ items?: Trace[]; nextCursor?: number | null } | Trace[]>(
+          `/api/traces?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&envelope=1`
+        ),
+        fetchJson<{ items?: WideEvent[]; nextCursor?: number | null } | WideEvent[]>(
+          `/api/events?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&envelope=1`
+        ),
+        fetchJson<Stats>(`/api/stats?dropId=${activeDropId}`),
       ]);
-      const tracesJson = await tracesRes.json();
-      const eventsJson = await eventsRes.json();
-      setTraces(tracesJson.items ?? tracesJson);
-      setEvents(eventsJson.items ?? eventsJson);
-      setTraceNextCursor(tracesJson.nextCursor ?? null);
-      setEventNextCursor(eventsJson.nextCursor ?? null);
-      setStats(await statsRes.json());
+      if (seq !== dataRequestSeqRef.current || activeDropId !== dropIdRef.current) return;
+      const nextTraces = Array.isArray(tracesJson) ? tracesJson : tracesJson.items ?? [];
+      const nextEvents = Array.isArray(eventsJson) ? eventsJson : eventsJson.items ?? [];
+      setTraces(Array.isArray(nextTraces) ? nextTraces : []);
+      setEvents(Array.isArray(nextEvents) ? nextEvents : []);
+      setTraceNextCursor(Array.isArray(tracesJson) ? null : tracesJson.nextCursor ?? null);
+      setEventNextCursor(Array.isArray(eventsJson) ? null : eventsJson.nextCursor ?? null);
+      setStats(nextStats);
     } catch (error) {
       console.error('Failed to fetch data:', error);
+      if (seq === dataRequestSeqRef.current) {
+        setTraces([]);
+        setEvents([]);
+        setTraceNextCursor(null);
+        setEventNextCursor(null);
+        setStats({ traces: 0, wideEvents: 0, errors: 0 });
+      }
     } finally {
-      setListLoading(false);
+      if (seq === dataRequestSeqRef.current) setListLoading(false);
     }
   }, [authReady, dataLocked]);
 
   const fetchMoreListRows = useCallback(async () => {
     if (!authReady) return;
     if (dataLocked) return;
-    if (dropIdRef.current === null) return;
+    const activeDropId = dropIdRef.current;
+    if (activeDropId === null) return;
     if (tab !== 'events' && tab !== 'traces') return;
     const cursor = tab === 'events' ? eventNextCursor : traceNextCursor;
     if (!cursor) return;
     setListLoading(true);
     try {
       const resource = tab === 'events' ? 'events' : 'traces';
-      const res = await fetch(`/api/${resource}?dropId=${dropIdRef.current}&limit=${LIST_PAGE_SIZE}&beforeId=${cursor}&envelope=1`);
-      const json = await res.json();
-      const items = json.items ?? json;
+      const json = await fetchJson<{ items?: Array<Trace | WideEvent>; nextCursor?: number | null } | Array<Trace | WideEvent>>(
+        `/api/${resource}?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&beforeId=${cursor}&envelope=1`
+      );
+      const items = Array.isArray(json) ? json : json.items ?? [];
+      const nextCursor = Array.isArray(json) ? null : json.nextCursor ?? null;
+      if (activeDropId !== dropIdRef.current) return;
       if (tab === 'events') {
-        setEvents((prev) => [...prev, ...items]);
-        setEventNextCursor(json.nextCursor ?? null);
+        setEvents((prev) => [...prev, ...(items as WideEvent[])]);
+        setEventNextCursor(nextCursor);
       } else {
-        setTraces((prev) => [...prev, ...items]);
-        setTraceNextCursor(json.nextCursor ?? null);
+        setTraces((prev) => [...prev, ...(items as Trace[])]);
+        setTraceNextCursor(nextCursor);
       }
     } catch (error) {
-      console.error('Failed to fetch more rows:', error);
+      console.error('Failed to fetch older rows:', error);
+      setAppToast('Failed to load older rows');
     } finally {
       setListLoading(false);
     }
@@ -2013,9 +390,9 @@ export default function App() {
   const fetchDrops = useCallback(async () => {
     if (!authReady) return;
     try {
-      const res = await fetch('/api/drops');
-      const json = (await res.json()) as { default_drop_id: number; drops: Drop[] };
-      setDrops(json.drops);
+      const json = await fetchJson<{ default_drop_id: number; drops: Drop[] }>('/api/drops');
+      const nextDrops = Array.isArray(json.drops) ? json.drops : [];
+      setDrops(nextDrops);
       setDefaultDropId(json.default_drop_id);
 
       const urlDropRaw = new URLSearchParams(window.location.search).get('drop');
@@ -2023,20 +400,23 @@ export default function App() {
       const stored = window.localStorage.getItem('raphael.dropId');
       const storedId = stored && /^\d+$/.test(stored) ? Number.parseInt(stored, 10) : null;
       const desired = urlDropId ?? storedId ?? json.default_drop_id;
-      const exists = json.drops.some((d) => d.id === desired);
-      setDropId(exists ? desired : json.drops[0]?.id ?? null);
+      const exists = nextDrops.some((d) => d.id === desired);
+      setDropId(exists ? desired : nextDrops[0]?.id ?? null);
     } catch (error) {
       console.error('Failed to fetch drops:', error);
-      setDropId(1);
+      setDrops([]);
+      setDropId(null);
     }
   }, [authReady]);
 
   const fetchDashboards = useCallback(async () => {
     if (!authReady) return;
-    if (dropIdRef.current === null) return;
+    const activeDropId = dropIdRef.current;
+    if (activeDropId === null) return;
+    const seq = ++dashboardRequestSeqRef.current;
     try {
-      const res = await fetch(`/api/dashboards?dropId=${dropIdRef.current}`);
-      const rows = (await res.json()) as DashboardRow[];
+      const rows = await fetchJson<DashboardRow[]>(`/api/dashboards?dropId=${activeDropId}`);
+      if (seq !== dashboardRequestSeqRef.current || activeDropId !== dropIdRef.current) return;
       setDashboards(rows);
       if (dashboardSelectedId !== null && !rows.some((d) => d.id === dashboardSelectedId)) {
         setDashboardSelectedId(null);
@@ -2046,15 +426,22 @@ export default function App() {
       }
     } catch (error) {
       console.error('Failed to fetch dashboards:', error);
+      if (seq === dashboardRequestSeqRef.current) {
+        setDashboards([]);
+        setDashboardSelectedId(null);
+        setDashboardSpec(null);
+        setDashboardName('');
+        setDashboardSample([]);
+      }
     }
   }, [dashboardSelectedId, authReady]);
 
   const fetchServiceAccounts = useCallback(async () => {
     if (!authActive || !authUser) return;
     try {
-      const res = await fetch('/api/account/service-accounts');
-      if (!res.ok) throw new Error('Failed to load service accounts');
-      const rows = (await res.json()) as Array<{ id: number; name: string; created_at: number; created_by_email: string | null }>;
+      const rows = await fetchJson<Array<{ id: number; name: string; created_at: number; created_by_email: string | null }>>(
+        '/api/account/service-accounts'
+      );
       setServiceAccounts(rows);
       if (rows.length && selectedServiceAccountId === null) {
         setSelectedServiceAccountId(rows[0].id);
@@ -2067,9 +454,7 @@ export default function App() {
   const fetchApiKeys = useCallback(async () => {
     if (!authActive || !authUser) return;
     try {
-      const res = await fetch('/api/account/api-keys');
-      if (!res.ok) throw new Error('Failed to load API keys');
-      const rows = (await res.json()) as Array<{
+      const rows = await fetchJson<Array<{
         id: number;
         service_account_id: number;
         name: string | null;
@@ -2077,7 +462,7 @@ export default function App() {
         created_at: number;
         revoked_at: number | null;
         permissions: Array<{ drop_id: number; can_ingest: number; can_query: number }>;
-      }>;
+      }>>('/api/account/api-keys');
       setApiKeys(rows);
     } catch (error) {
       console.error('Failed to fetch API keys:', error);
@@ -2088,11 +473,9 @@ export default function App() {
     if (!authActive || !authUser) return;
     try {
       setAccountDropsLoaded(false);
-      const res = await fetch('/api/account/drops');
-      if (!res.ok) throw new Error('Failed to load drops');
-      const json = (await res.json()) as {
+      const json = await fetchJson<{
         drops: Array<{ id: number; name: string; label: string | null; can_ingest: number; can_query: number }>;
-      };
+      }>('/api/account/drops');
       setAccountDrops(json.drops ?? []);
     } catch (error) {
       console.error('Failed to fetch account drops:', error);
@@ -2120,9 +503,7 @@ export default function App() {
   const fetchUsers = useCallback(async () => {
     if (!authActive || !authUser || !isAdmin) return;
     try {
-      const res = await fetch('/api/admin/users');
-      if (!res.ok) throw new Error('Failed to load users');
-      const rows = (await res.json()) as Array<{
+      const rows = await fetchJson<Array<{
         user_id: string;
         email: string;
         role: 'admin' | 'member';
@@ -2130,7 +511,7 @@ export default function App() {
         protected_admin?: boolean;
         created_at: number;
         last_login_at: number | null;
-      }>;
+      }>>('/api/admin/users');
       setUsers(rows);
       if (rows.length > 0) {
         if (!selectedUserId || !rows.some((u) => u.user_id === selectedUserId)) {
@@ -2148,15 +529,13 @@ export default function App() {
     if (!authActive || !authUser || !isAdmin) return;
     try {
       setAuthPolicyError(null);
-      const res = await fetch('/api/admin/auth-policy');
-      const json = (await res.json()) as {
+      const json = await fetchJson<{
         oauth_only?: boolean;
         allowed_domains?: string[];
         allowed_emails?: string[];
         default_permissions?: Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>;
         error?: string;
-      };
-      if (!res.ok) throw new Error(json?.error || 'Failed to load auth policy');
+      }>('/api/admin/auth-policy');
       const domains = (json.allowed_domains ?? []).join('\n');
       const emails = (json.allowed_emails ?? []).join('\n');
       setAuthPolicyDomains(domains);
@@ -2187,18 +566,16 @@ export default function App() {
         .split(/[\n,]/g)
         .map((e) => e.trim())
         .filter(Boolean);
-      const res = await fetch('/api/admin/auth-policy', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allowed_domains: domains, allowed_emails: emails, default_permissions: authPolicyDefaultPermissions }),
-      });
-      const json = (await res.json()) as {
+      const json = await fetchJson<{
         allowed_domains?: string[];
         allowed_emails?: string[];
         default_permissions?: Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>;
         error?: string;
-      };
-      if (!res.ok) throw new Error(json?.error || 'Failed to save auth policy');
+      }>('/api/admin/auth-policy', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowed_domains: domains, allowed_emails: emails, default_permissions: authPolicyDefaultPermissions }),
+      });
       setAuthPolicyDomains((json.allowed_domains ?? []).join('\n'));
       setAuthPolicyEmails((json.allowed_emails ?? []).join('\n'));
       setAuthPolicyDefaultPermissions(
@@ -2222,9 +599,9 @@ export default function App() {
     async (userId: string) => {
       if (!authActive || !authUser || !isAdmin) return;
       try {
-        const res = await fetch(`/api/admin/users/${userId}/permissions`);
-        if (!res.ok) throw new Error('Failed to load user permissions');
-        const rows = (await res.json()) as Array<{ drop_id: number; can_ingest: number; can_query: number }>;
+        const rows = await fetchJson<Array<{ drop_id: number; can_ingest: number; can_query: number }>>(
+          `/api/admin/users/${userId}/permissions`
+        );
         setUserPermissions(rows);
       } catch (error) {
         console.error('Failed to fetch user permissions:', error);
@@ -2506,16 +883,16 @@ export default function App() {
       if (dropIdRef.current === null) return;
       if (tab === 'dashboards' || tab === 'settings') return;
       if (tab === 'traces') {
-        const res = await fetch(
+        const rows = await fetchJson<Trace[]>(
           `/api/search/traces?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}&limit=${LIST_PAGE_SIZE}`
         );
-        setTraces(await res.json());
+        setTraces(Array.isArray(rows) ? rows : []);
         setTraceNextCursor(null);
       } else {
-        const res = await fetch(
+        const rows = await fetchJson<WideEvent[]>(
           `/api/search/events?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}&limit=${LIST_PAGE_SIZE}`
         );
-        setEvents(await res.json());
+        setEvents(Array.isArray(rows) ? rows : []);
         setEventNextCursor(null);
       }
     } catch (error) {
@@ -2527,8 +904,12 @@ export default function App() {
     if (!authReady) return;
     if (!confirm('Clear all traces and events?')) return;
     if (dropIdRef.current === null) return;
-    await fetch(`/api/clear?dropId=${dropIdRef.current}`, { method: 'DELETE' });
-    fetchData();
+    try {
+      await fetchJson<{ success: boolean }>(`/api/clear?dropId=${dropIdRef.current}`, { method: 'DELETE' });
+      fetchData();
+    } catch (error) {
+      setAppToast((error as Error).message || 'Clear failed');
+    }
   };
 
   useEffect(() => {
@@ -2582,8 +963,7 @@ export default function App() {
     if (authActive && !isAdmin) return;
     void (async () => {
       try {
-        const res = await fetch('/api/settings/openrouter');
-        const json = (await res.json()) as { model: string; api_key_set: boolean };
+        const json = await fetchJson<{ model: string; api_key_set: boolean }>('/api/settings/openrouter');
         setOpenRouterModel(json.model || '');
         setOpenRouterApiKeySet(Boolean(json.api_key_set));
       } catch (error) {
@@ -2655,29 +1035,40 @@ export default function App() {
   }, [apiKeyDropId, accountDrops, authActive, authUser, isAdmin, apiKeyCanIngest, apiKeyCanQuery]);
 
   useEffect(() => {
+    if (authEnabled === null) return;
     if (authActive && !authUser) return;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    let disposed = false;
+    let reconnectTimer: number | null = null;
 
     const connect = () => {
+      if (disposed) return;
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
+        if (disposed) return;
         setConnected(true);
         console.log('WebSocket connected');
         subscribeWs(dropIdRef.current);
       };
 
       ws.onclose = () => {
+        if (disposed) return;
         setConnected(false);
         console.log('WebSocket disconnected, reconnecting...');
-        setTimeout(connect, 2000);
+        reconnectTimer = window.setTimeout(connect, 2000);
       };
 
       ws.onmessage = (event) => {
-        if (paused) return;
+        if (pausedRef.current) return;
 
-        const data = JSON.parse(event.data);
+        let data: any;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
         if (data?.drop_id !== undefined && dropIdRef.current !== null && data.drop_id !== dropIdRef.current) return;
 
         if (data.type === 'traces') {
@@ -2712,9 +1103,12 @@ export default function App() {
     connect();
 
     return () => {
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       wsRef.current?.close();
+      wsRef.current = null;
     };
-  }, [paused, subscribeWs, authActive, authUser]);
+  }, [subscribeWs, authEnabled, authActive, authUser]);
 
   const activeFilters: FilterState =
     tab === 'events' ? eventFilters : tab === 'traces' ? traceFilters : {};
@@ -2776,7 +1170,7 @@ export default function App() {
       setDashboardEditingWidgetId(null);
       return;
     }
-    if (dashboardMode === 'view') {
+    if (dashboardMode === 'view' || !canManageDashboards) {
       setDashboardEditingWidgetId(null);
       return;
     }
@@ -2787,7 +1181,13 @@ export default function App() {
       return;
     }
     setDashboardEditingWidgetId(effectiveDashboardSpec.widgets[0]?.id ?? null);
-  }, [effectiveDashboardSpec, dashboardEditingWidgetId, dashboardMode]);
+  }, [effectiveDashboardSpec, dashboardEditingWidgetId, dashboardMode, canManageDashboards]);
+
+  useEffect(() => {
+    if (!canManageDashboards && dashboardMode === 'edit') {
+      setDashboardMode('view');
+    }
+  }, [canManageDashboards, dashboardMode]);
 
   const statsForTab =
     tab === 'events'
@@ -2838,19 +1238,6 @@ export default function App() {
   const clearAllFilters = () => {
     if (tab === 'events') setEventFilters({});
     else setTraceFilters({});
-  };
-
-  const openEventDetail = async (event: WideEvent) => {
-    setSelected({ type: 'event', event });
-    if (dropIdRef.current === null || event.attributes) return;
-    try {
-      const res = await fetch(`/api/events/${event.id}?dropId=${dropIdRef.current}`);
-      if (!res.ok) return;
-      const full = (await res.json()) as WideEvent;
-      setSelected((prev) => (prev?.type === 'event' && prev.event.id === event.id ? { type: 'event', event: full } : prev));
-    } catch (error) {
-      console.error('Failed to load event details:', error);
-    }
   };
 
   const handleCreateDrop = async () => {
@@ -2969,9 +1356,7 @@ export default function App() {
     if (dropIdRef.current === null) return;
     setDashboardLoading(true);
     try {
-      const res = await fetch(`/api/dashboards/${id}?dropId=${dropIdRef.current}`);
-      if (!res.ok) throw new Error('Failed to load dashboard');
-      const row = (await res.json()) as DashboardRow;
+      const row = await fetchJson<DashboardRow>(`/api/dashboards/${id}?dropId=${dropIdRef.current}`);
       setDashboardSelectedId(row.id);
       setDashboardName(row.name);
       const spec = parseDashboardSpec(row.spec_json);
@@ -2991,8 +1376,7 @@ export default function App() {
     setDashboardLoading(true);
     try {
       const limit = Math.max(100, Math.min(20_000, Number(dashboardSpec.sampleSize ?? 2000)));
-      const res = await fetch(`/api/events?dropId=${dropIdRef.current}&limit=${limit}`);
-      const data = (await res.json()) as WideEvent[];
+      const data = await fetchJson<WideEvent[]>(`/api/events?dropId=${dropIdRef.current}&limit=${limit}`);
       setDashboardSample(data);
     } catch (error) {
       alert((error as Error).message);
@@ -3102,7 +1486,7 @@ export default function App() {
       const res = await fetch(`/api/dashboards/generate?dropId=${dropIdRef.current}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ limit, use_ai: generateUseAi }),
+        body: JSON.stringify({ limit, use_ai: generateUseAi, ack_external_ai: generateUseAi }),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json?.error || 'Failed to generate dashboard');
@@ -3567,10 +1951,32 @@ export default function App() {
         tr:hover { background: #1a1a1a; }
         input::placeholder { color: #666; }
         button:hover { opacity: 0.9; }
+        @media (max-width: 640px) {
+          .app-header {
+            height: auto !important;
+            min-height: 72px;
+            padding: 12px 16px !important;
+            gap: 10px;
+            flex-wrap: wrap;
+          }
+          .app-header-brand {
+            width: 100%;
+            justify-content: space-between;
+            min-width: 0;
+          }
+          .app-header-stats {
+            width: 100%;
+            justify-content: space-between;
+            gap: 8px !important;
+          }
+          .app-sticky-nav {
+            position: static !important;
+          }
+        }
       `}</style>
 
-      <header style={styles.header}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      <header className="app-header" style={styles.header}>
+        <div className="app-header-brand" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <div style={styles.logo}>
             <img
               src="/raphael-icon-192.png"
@@ -3606,7 +2012,7 @@ export default function App() {
             </span>
           </button>
         </div>
-        <div style={styles.stats}>
+        <div className="app-header-stats" style={styles.stats}>
           <div style={styles.stat}>
             <div style={styles.statValue}>{stats.wideEvents}</div>
             <div style={styles.statLabel}>Events</div>
@@ -3625,7 +2031,7 @@ export default function App() {
 	      </header>
 
 	      <main style={styles.main}>
-	        <div style={styles.stickyNav}>
+	        <div className="app-sticky-nav" style={styles.stickyNav}>
 	          <div style={styles.tabs}>
 		          <button
 		            style={{
@@ -3674,27 +2080,31 @@ export default function App() {
 	          <div style={styles.toolbar}>
 		          {tab === 'dashboards' ? (
 		            <>
-		              <button
-		                style={styles.button}
-	                onClick={() => setDashboardMode(dashboardMode === 'edit' ? 'view' : 'edit')}
-                disabled={!dashboardSpec}
-                title={dashboardMode === 'edit' ? 'Hide config knobs' : 'Show config knobs'}
-              >
-                {dashboardMode === 'edit' ? 'View Mode' : 'Edit Mode'}
-              </button>
-              <button style={styles.button} onClick={() => setShowNewDashboard(true)} disabled={dropId === null}>
-                New Dashboard
-              </button>
-              <button style={styles.button} onClick={() => setShowGenerateDashboard(true)} disabled={dropId === null}>
-                Generate
-              </button>
+              {canManageDashboards && (
+                <>
+                  <button
+                    style={styles.button}
+                    onClick={() => setDashboardMode(dashboardMode === 'edit' ? 'view' : 'edit')}
+                    disabled={!dashboardSpec}
+                    title={dashboardMode === 'edit' ? 'Hide config knobs' : 'Show config knobs'}
+                  >
+                    {dashboardMode === 'edit' ? 'View Mode' : 'Edit Mode'}
+                  </button>
+                  <button style={styles.button} onClick={() => setShowNewDashboard(true)} disabled={dropId === null}>
+                    New Dashboard
+                  </button>
+                  <button style={styles.button} onClick={() => setShowGenerateDashboard(true)} disabled={dropId === null}>
+                    Generate
+                  </button>
+                </>
+              )}
               <button style={styles.button} onClick={fetchDashboards} disabled={dropId === null}>
                 Refresh List
               </button>
               <button style={styles.button} onClick={refreshDashboardSample} disabled={!dashboardSpec || dropId === null}>
                 Refresh Data
               </button>
-              {dashboardMode === 'edit' && (
+              {canManageDashboards && dashboardMode === 'edit' && (
                 <>
                   <button style={styles.button} onClick={saveDashboard} disabled={!dashboardSpec || dropId === null}>
                     Save
@@ -3770,9 +2180,6 @@ export default function App() {
               <button style={styles.button} onClick={() => setPaused(!paused)}>
                 {paused ? 'Resume' : 'Pause'}
               </button>
-              <div style={styles.pill}>
-                Loaded <span style={{ color: '#fff' }}>{tab === 'events' ? events.length : traces.length}</span> latest rows
-              </div>
               <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={handleClear}>
                 Clear
               </button>
@@ -5606,97 +4013,17 @@ export default function App() {
               </div>
             </div>
           ) : tab === 'events' ? (
-            events.length === 0 ? (
-              <div style={styles.empty}>No wide events yet. They will appear here in real-time.</div>
-            ) : visibleEvents.length === 0 ? (
-              <div style={styles.empty}>No matches. Adjust filters or search.</div>
-            ) : (
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Time</th>
-                    <th style={styles.th}>Service</th>
-                    <th style={styles.th}>Operation</th>
-                    <th style={styles.th}>Outcome</th>
-                    <th style={styles.th}>Duration</th>
-                    <th style={styles.th}>User</th>
-                    <th style={styles.th}>Trace ID</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleEvents.map((event) => (
-                    <tr
-                      key={event.id || `${event.trace_id}-${event.created_at}`}
-                      style={styles.row}
-                      onClick={() => openEventDetail(event)}
-                    >
-                      <td style={styles.td}>{formatTime(getEventTime(event))}</td>
-                      <td style={styles.td}>{event.service_name}</td>
-                      <td style={styles.td}>
-                        {event.operation_type}:{event.field_name}
-                      </td>
-                      <td style={styles.td}>
-                        <span
-                          style={{
-                            ...styles.badge,
-                            ...(event.outcome === 'error' ? styles.badgeError : styles.badgeSuccess),
-                          }}
-                        >
-                          {event.outcome}
-                        </span>
-                      </td>
-                      <td style={styles.td}>{formatDuration(event.duration_ms)}</td>
-                      <td style={styles.td}>{event.user_id || '-'}</td>
-                      <td style={{ ...styles.td, ...styles.mono }}>
-                        {event.trace_id ? truncate(event.trace_id, 12) : '-'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )
-          ) : traces.length === 0 ? (
-            <div style={styles.empty}>No traces yet. They will appear here in real-time.</div>
-          ) : visibleTraces.length === 0 ? (
-            <div style={styles.empty}>No matches. Adjust filters or search.</div>
+            <EventsTable
+              allEvents={events}
+              visibleEvents={visibleEvents}
+              onSelect={(event) => setSelected({ type: 'event', event })}
+            />
           ) : (
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>Time</th>
-                  <th style={styles.th}>Service</th>
-                  <th style={styles.th}>Operation</th>
-                  <th style={styles.th}>Status</th>
-                  <th style={styles.th}>Duration</th>
-                  <th style={styles.th}>Trace ID</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleTraces.map((trace) => (
-                  <tr
-                    key={trace.id || `${trace.trace_id}-${trace.span_id}`}
-                    style={styles.row}
-                    onClick={() => setSelected({ type: 'trace', traceId: trace.trace_id, focusSpanId: trace.span_id })}
-                  >
-                    <td style={styles.td}>{formatTime(getTraceTime(trace))}</td>
-                    <td style={styles.td}>{trace.service_name}</td>
-                    <td style={styles.td}>{truncate(trace.operation_name, 50)}</td>
-                    <td style={styles.td}>
-                      <span
-                        style={{
-                          ...styles.badge,
-                          ...(trace.status === 'error' ? styles.badgeError : styles.badgeSuccess),
-                        }}
-                      >
-                        {trace.status}
-                      </span>
-                    </td>
-                    <td style={styles.td}>{formatDuration(trace.duration_ms)}</td>
-                    <td style={{ ...styles.td, ...styles.mono }}>{truncate(trace.trace_id, 12)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <TracesTable
+              allTraces={traces}
+              visibleTraces={visibleTraces}
+              onSelect={(trace) => setSelected({ type: 'trace', traceId: trace.trace_id, focusSpanId: trace.span_id })}
+            />
           )}
           {tab !== 'dashboards' && tab !== 'settings' && (
             <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', padding: '16px' }}>
@@ -5706,7 +4033,15 @@ export default function App() {
                 disabled={listLoading || (tab === 'events' ? !eventNextCursor : !traceNextCursor) || Boolean(search.trim())}
                 title={search.trim() ? 'Clear search to page through the latest rows' : undefined}
               >
-                {listLoading ? 'Loading…' : tab === 'events' ? (eventNextCursor ? 'Load older events' : 'No more loaded pages') : (traceNextCursor ? 'Load older traces' : 'No more loaded pages')}
+                {listLoading
+                  ? 'Loading...'
+                  : tab === 'events'
+                    ? eventNextCursor
+                      ? 'Load older events'
+                      : 'No more loaded pages'
+                    : traceNextCursor
+                      ? 'Load older traces'
+                      : 'No more loaded pages'}
               </button>
               <button style={styles.button} onClick={fetchData} disabled={listLoading}>
                 Refresh latest {LIST_PAGE_SIZE}

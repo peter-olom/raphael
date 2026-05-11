@@ -22,6 +22,10 @@ docker compose logs -f raphael
 
 Data persists in a named volume mounted at `/data` inside the container.
 
+For compatibility with older Compose deployments, the app publishes on all interfaces unless `RAPHAEL_HOST_BIND` is set. Use `RAPHAEL_HOST_BIND=127.0.0.1` for same-host reverse proxies or local-only installs. Publish on all interfaces only when the deployment has auth, TLS, and a trusted network boundary.
+
+Raphael trusts loopback reverse proxies by default so `X-Forwarded-For` is used for client IP decisions when a same-host proxy connects locally. If your trusted proxy reaches Raphael over another private network, set `RAPHAEL_TRUST_PROXY` to the exact proxy subnet or hop count. Only enable broader proxy trust when the app is not directly reachable and the proxy overwrites forwarded headers.
+
 If you are upgrading from an older Raphael version that wrote the DB under `/app/data`, the volume may be root-owned. The included `raphael-init` service fixes volume permissions at startup so the main container can stay non-root.
 
 ## Container Image (GHCR)
@@ -47,12 +51,16 @@ For public deployments, set:
 - `BETTER_AUTH_SECRET` (32+ chars)
 - `BETTER_AUTH_BASE_URL` (the externally reachable base URL, e.g. `https://raphael.example.com`)
 - `RAPHAEL_AUTH_TRUSTED_ORIGINS` (comma-separated origins allowed to initiate auth, typically the same as the base URL)
+- `RAPHAEL_CORS_ORIGINS` if browser clients need cross-origin API access
+- `RAPHAEL_ADMIN_EMAIL` so first-admin bootstrap is explicit
 
 If you enable email/password login:
 - `RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED=true`
 - `RAPHAEL_ADMIN_EMAIL` and `RAPHAEL_ADMIN_PASSWORD` for seeding/updating the admin password
 
 If you are using OAuth providers, configure the provider env vars and ensure their callback URLs match `BETTER_AUTH_BASE_URL`.
+
+In production, unauthenticated admin mutations are denied unless `RAPHAEL_ALLOW_UNAUTH_ADMIN=true`. Do not enable that flag for public deployments.
 
 ### OAuth Allowlist (Optional, OAuth-Only Mode)
 
@@ -71,7 +79,14 @@ Raphael can be run behind a reverse proxy for TLS termination and basic request 
 Recommended proxy hardening:
 - TLS (Let’s Encrypt)
 - reasonable request body limits (OTLP payloads can be large)
-- rate limiting (if exposed to the internet)
+- edge rate limiting if exposed to the internet
+- overwrite `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`
+
+Raphael also enforces local ingest rate limits before writes:
+- `RAPHAEL_INGEST_RATE_LIMIT_REQUESTS_PER_MINUTE` (default `600`)
+- `RAPHAEL_INGEST_RATE_LIMIT_ITEMS_PER_MINUTE` (default `60000`)
+- `RAPHAEL_INGEST_RATE_LIMIT_BURST_MULTIPLIER` (default `2`)
+- `RAPHAEL_TRUST_PROXY` (default `loopback`; set to a trusted subnet or hop count for non-loopback proxies)
 
 If you already have an ingress/proxy, point it at `raphael:6274`.
 
@@ -108,10 +123,18 @@ If you change `RAPHAEL_DB_PATH`, keep it under `/data` unless you also update th
 3. Monitor auth configuration.
 - Ensure `BETTER_AUTH_BASE_URL` is correct.
 - Keep `RAPHAEL_AUTH_TRUSTED_ORIGINS` tight.
+- Keep first-admin bootstrap explicit with `RAPHAEL_ADMIN_EMAIL`.
 
 4. Reduce exposure.
 - Put Raphael behind a proxy.
 - Consider IP allowlisting for internal-only deployments.
+- Keep the default localhost bind unless the proxy is on another host.
+- Keep `RAPHAEL_TRUST_PROXY` scoped to the actual trusted proxy path.
 
 5. Strong isolation (Optional).
 - Run under gVisor/Kata if your platform supports it for tighter syscall isolation.
+
+6. Retention and compaction.
+- Retention pruning automatically checkpoints and reclaims SQLite free pages by default.
+- Keep `RAPHAEL_PRUNE_COMPACT_AFTER_DELETE=true` unless write-lock duration becomes a problem.
+- For older databases that were not created with incremental vacuum, Raphael runs full VACUUM only after the configured free-page threshold is reached.

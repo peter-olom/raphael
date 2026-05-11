@@ -12,6 +12,8 @@ docker compose logs -f raphael
 Open:
 - `http://localhost:6274`
 
+For local-only installs, set `RAPHAEL_HOST_BIND=127.0.0.1`. Publish on all interfaces only when auth and a reverse proxy are configured.
+
 ## Run With Node.js
 
 ```bash
@@ -29,4 +31,3 @@ By default, Raphael stores data in SQLite.
 
 In Docker Compose it writes to:
 - `/data/raphael.db` (mounted via the `raphael-data` volume)
-

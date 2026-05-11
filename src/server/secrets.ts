@@ -1,10 +1,8 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { DB_PATH } from './paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.RAPHAEL_DB_PATH || path.join(__dirname, '../../data/raphael.db');
 const DATA_DIR = path.dirname(DB_PATH);
 const KEY_FILE = path.join(DATA_DIR, 'raphael.secret');
 
@@ -67,4 +65,3 @@ export function decryptSecret(value: string): string {
   const dec = Buffer.concat([decipher.update(data), decipher.final()]);
   return dec.toString('utf8');
 }
-

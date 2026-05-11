@@ -56,6 +56,7 @@ COPY --from=builder /data /data
 
 EXPOSE 6274
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/nodejs/bin/node", "-e", "const p=process.env.PORT||6274; fetch(`http://127.0.0.1:${p}/api/auth/config`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
 # Distroless node images use "node" as entrypoint; provide the script as CMD.
 CMD ["dist/server/index.js"]
-

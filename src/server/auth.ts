@@ -7,6 +7,7 @@ import { genericOAuth } from 'better-auth/plugins';
 import {
   applySqlitePragmas,
   DB_PATH,
+  countAdminProfiles,
   countUserProfiles,
   getAppSetting,
   getUserDropPermission,
@@ -48,6 +49,10 @@ export interface AuthContext {
 
 function isTruthy(value: unknown) {
   return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase());
+}
+
+function isProduction() {
+  return (process.env.NODE_ENV || '').toLowerCase() === 'production';
 }
 
 export function authEnabled() {
@@ -171,6 +176,40 @@ function oauthOnlyMode() {
   return authEnabled() && !emailPasswordEnabled;
 }
 
+export function isOauthAllowlistEnforced() {
+  return oauthOnlyMode();
+}
+
+function allowFirstUserAdmin() {
+  if (isTruthy(process.env.RAPHAEL_ALLOW_FIRST_USER_ADMIN)) return true;
+  return !isProduction();
+}
+
+export function validateAuthBootstrapConfig() {
+  if (!authEnabled() || !isProduction()) return;
+  if (countAdminProfiles() > 0) return;
+  if ((process.env.RAPHAEL_ADMIN_EMAIL || '').trim()) return;
+  if (allowFirstUserAdmin()) return;
+
+  throw new Error(
+    'Production auth requires an admin bootstrap path. Set RAPHAEL_ADMIN_EMAIL, enable RAPHAEL_ALLOW_FIRST_USER_ADMIN for first-login bootstrap, or create an admin profile before starting.'
+  );
+}
+
+function allowUnauthenticatedAdmin() {
+  if (isTruthy(process.env.RAPHAEL_ALLOW_UNAUTH_ADMIN)) return true;
+  if (!isProduction()) return true;
+  return false;
+}
+
+function requestPathWithoutQuery(req: Request) {
+  try {
+    return new URL(req.originalUrl || req.url, 'http://raphael.local').pathname;
+  } catch {
+    return req.path || req.url.split('?')[0] || '/';
+  }
+}
+
 function getOauthAllowlist() {
   const allowedDomains = parseJsonArraySetting(getAppSetting('raphael.auth.allowed_domains'))
     .map(normalizeDomain)
@@ -215,9 +254,9 @@ function isOauthEmailAllowed(emailRaw: string) {
   return false;
 }
 
-let authInstance: ReturnType<typeof betterAuth> | null = null;
+let authInstance: any | null = null;
 
-export function getAuth() {
+export function getAuth(): any {
   if (!authEnabled()) {
     throw new Error('Auth is disabled');
   }
@@ -272,7 +311,7 @@ export function getAuth() {
 }
 
 // Used by the Express routing layer. Kept separate so index.ts doesn't need to know about lazy init.
-export function getAuthNodeHandler() {
+export function getAuthNodeHandler(): any {
   return getAuth();
 }
 
@@ -309,6 +348,8 @@ export function getAuthConfigSummary() {
       domains_count: allow.allowedDomains.length,
       emails_count: allow.allowedEmails.length,
     },
+    first_user_admin_enabled: allowFirstUserAdmin(),
+    unauthenticated_admin_enabled: !enabled && (isTruthy(process.env.RAPHAEL_ALLOW_UNAUTH_ADMIN) || !isProduction()),
     base_url_set: Boolean(baseURL),
     trusted_origins_set: Boolean(trustedOrigins && trustedOrigins.length > 0),
   };
@@ -340,7 +381,7 @@ export async function ensureUserProfile(user: { id: string; email: string }) {
   let role: 'admin' | 'member' | undefined = undefined;
   if (!existing) {
     const hasUsers = countUserProfiles() > 0;
-    role = isAdminEmail ? 'admin' : hasUsers ? 'member' : 'admin';
+    role = isAdminEmail ? 'admin' : hasUsers ? 'member' : allowFirstUserAdmin() ? 'admin' : 'member';
   } else if (isAdminEmail && existing.role !== 'admin') {
     role = 'admin';
   }
@@ -468,15 +509,19 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
       res.on('finish', () => {
         const ctx = req.auth;
         if (!ctx?.apiKey) return;
-        logApiKeyUsage({
-          api_key_id: ctx.apiKey.id,
-          drop_id: ctx.apiKeyUsageDropId ?? null,
-          method: req.method,
-          path: req.originalUrl || req.url,
-          status_code: res.statusCode,
-          ip_address: req.ip,
-          user_agent: req.header('user-agent') || null,
-        });
+        try {
+          logApiKeyUsage({
+            api_key_id: ctx.apiKey.id,
+            drop_id: ctx.apiKeyUsageDropId ?? null,
+            method: req.method,
+            path: requestPathWithoutQuery(req),
+            status_code: res.statusCode,
+            ip_address: req.ip,
+            user_agent: req.header('user-agent') || null,
+          });
+        } catch (error) {
+          console.warn('Failed to log API key usage:', error);
+        }
       });
 
       return next();
@@ -499,7 +544,11 @@ export function requireAuth(req: Request, res: Response) {
 }
 
 export function requireAdmin(req: Request, res: Response) {
-  if (!authEnabled()) return true;
+  if (!authEnabled()) {
+    if (allowUnauthenticatedAdmin()) return true;
+    res.status(403).json({ error: 'Admin operations require auth in production. Enable auth or set RAPHAEL_ALLOW_UNAUTH_ADMIN=true.' });
+    return false;
+  }
   if (req.auth?.authType === 'disabled') {
     res.status(403).json({ error: 'User is disabled' });
     return false;

@@ -14,7 +14,7 @@ services:
       raphael-init:
         condition: service_completed_successfully
     ports:
-      - "6274:6274"
+      - "${RAPHAEL_HOST_BIND:-0.0.0.0}:6274:6274"
     volumes:
       - raphael-data:/data
     environment:
@@ -38,6 +38,19 @@ services:
       - RAPHAEL_AUTH_AZURE_CLIENT_ID=${RAPHAEL_AUTH_AZURE_CLIENT_ID:-}
       - RAPHAEL_AUTH_AZURE_CLIENT_SECRET=${RAPHAEL_AUTH_AZURE_CLIENT_SECRET:-}
       - RAPHAEL_AUTH_GENERIC_OAUTH=${RAPHAEL_AUTH_GENERIC_OAUTH:-}
+      - RAPHAEL_ALLOW_UNAUTH_ADMIN=${RAPHAEL_ALLOW_UNAUTH_ADMIN:-}
+      - RAPHAEL_ALLOW_FIRST_USER_ADMIN=${RAPHAEL_ALLOW_FIRST_USER_ADMIN:-}
+      - RAPHAEL_CORS_ORIGINS=${RAPHAEL_CORS_ORIGINS:-}
+      - RAPHAEL_TRUST_PROXY=${RAPHAEL_TRUST_PROXY:-loopback}
+      - RAPHAEL_INGEST_MAX_ITEMS=${RAPHAEL_INGEST_MAX_ITEMS:-5000}
+      - RAPHAEL_INGEST_RATE_LIMIT_REQUESTS_PER_MINUTE=${RAPHAEL_INGEST_RATE_LIMIT_REQUESTS_PER_MINUTE:-600}
+      - RAPHAEL_INGEST_RATE_LIMIT_ITEMS_PER_MINUTE=${RAPHAEL_INGEST_RATE_LIMIT_ITEMS_PER_MINUTE:-60000}
+      - RAPHAEL_INGEST_RATE_LIMIT_BURST_MULTIPLIER=${RAPHAEL_INGEST_RATE_LIMIT_BURST_MULTIPLIER:-2}
+      - RAPHAEL_SEARCH_ATTRIBUTES_ENABLED=${RAPHAEL_SEARCH_ATTRIBUTES_ENABLED:-false}
+      - RAPHAEL_WS_MAX_PAYLOAD_BYTES=${RAPHAEL_WS_MAX_PAYLOAD_BYTES:-65536}
+      - RAPHAEL_WS_MAX_BUFFERED_BYTES=${RAPHAEL_WS_MAX_BUFFERED_BYTES:-1048576}
+      - RAPHAEL_PRUNE_COMPACT_AFTER_DELETE=${RAPHAEL_PRUNE_COMPACT_AFTER_DELETE:-true}
+      - RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES=${RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES:-2048}
     restart: unless-stopped
     init: true
 
@@ -52,7 +65,7 @@ services:
     pids_limit: 200
     healthcheck:
       # Use Node (present in distroless) to avoid curl/wget in the runtime image.
-      test: ["CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:6274/api/auth/config').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "/nodejs/bin/node", "-e", "const p=process.env.PORT||6274; fetch(`http://127.0.0.1:$${p}/api/auth/config`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 3

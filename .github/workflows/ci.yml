@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
 
       - name: Install
@@ -30,3 +30,13 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Audit
+        run: npm audit
+
+      - name: Docs audit
+        run: npm audit
+        working-directory: docs

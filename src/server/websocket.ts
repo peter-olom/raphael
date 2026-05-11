@@ -24,7 +24,12 @@ export function hasSubscribers(dropId: number) {
 }
 
 export function setupWebSocket(server: Server) {
-  wss = new WebSocketServer({ server, path: '/ws' });
+  const maxPayload = Number(process.env.RAPHAEL_WS_MAX_PAYLOAD_BYTES || 64 * 1024);
+  wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    maxPayload: Number.isFinite(maxPayload) && maxPayload > 0 ? Math.floor(maxPayload) : 64 * 1024,
+  });
 
   wss.on('connection', async (ws, req) => {
     if (authEnabled()) {
@@ -105,14 +110,21 @@ export function broadcast(message: unknown, dropId?: number) {
   if (!wss) return;
 
   const data = JSON.stringify(message);
+  const maxBuffered = Number(process.env.RAPHAEL_WS_MAX_BUFFERED_BYTES || 1024 * 1024);
 
   wss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
+      if (Number.isFinite(maxBuffered) && maxBuffered > 0 && client.bufferedAmount > maxBuffered) {
+        client.close(1013, 'Backpressure limit exceeded');
+        return;
+      }
       if (dropId !== undefined) {
         const subscribedDropId = subscriptions.get(client as WebSocket) ?? DEFAULT_DROP_ID;
         if (subscribedDropId !== dropId) return;
       }
-      client.send(data);
+      client.send(data, (error) => {
+        if (error) console.error('WebSocket send failed:', error);
+      });
     }
   });
 }

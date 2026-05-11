@@ -5,6 +5,7 @@ import {
   listUserDropPermissions,
   listUserProfiles,
   listDrops,
+  deleteSessionsForUsers,
   resolveDropId,
   setUserDropPermissions,
   updateUserDisabled,
@@ -12,8 +13,8 @@ import {
   setAppSetting,
   createUserProfileIfMissing,
 } from '../db/sqlite.js';
-import { authEnabled, getAuth, requireAdmin, requireAuth } from '../auth.js';
 import { getRetentionSchedulerStatus } from '../retention.js';
+import { authEnabled, getAuth, isOauthAllowlistEnforced, requireAdmin, requireAuth } from '../auth.js';
 
 export const adminRouter = Router();
 
@@ -75,7 +76,6 @@ adminRouter.get('/me', (req: Request, res: Response) => {
     res.json({ enabled: false });
     return;
   }
-  if (!requireAuth(req, res)) return;
   res.json({ enabled: true, user: req.auth?.user ?? null });
 });
 
@@ -119,6 +119,36 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
   const role = adminEmail && email === adminEmail ? 'admin' : requestedRole;
 
   try {
+    const normalized =
+      role === 'admin'
+        ? []
+        : (Array.isArray(req.body?.permissions) ? req.body.permissions : [])
+            .map((p: any) => {
+              const rawDrop = p?.drop_id ?? p?.dropId ?? p?.drop;
+              const drop_id = Number(rawDrop);
+              if (!Number.isFinite(drop_id)) return null;
+              const can_ingest = Boolean(p?.can_ingest ?? p?.ingest ?? false);
+              const can_query = Boolean(p?.can_query ?? p?.query ?? false);
+              if (!can_ingest && !can_query) return null;
+              return { drop_id: Math.floor(drop_id), can_ingest, can_query };
+            })
+            .filter(Boolean) as Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>;
+
+    if (role !== 'admin') {
+      const existing = new Set(listDrops().map((d) => d.id));
+      for (const p of normalized) {
+        if (!existing.has(p.drop_id)) {
+          res.status(400).json({ error: `Unknown drop_id ${p.drop_id}` });
+          return;
+        }
+      }
+
+      if (normalized.length === 0) {
+        res.status(400).json({ error: 'Member users must be created with at least one drop permission' });
+        return;
+      }
+    }
+
     const nameRaw = (req.body?.name ?? '').toString().trim();
     const fallbackName = email.includes('@') ? email.split('@')[0] : email;
     const name = nameRaw || fallbackName;
@@ -143,35 +173,7 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
 
     // Assign initial permissions during account creation to avoid "user exists but cannot see anything".
     if (role !== 'admin') {
-      const permissions = Array.isArray(req.body?.permissions) ? req.body.permissions : [];
-      const normalized = permissions
-        .map((p: any) => {
-          const rawDrop = p?.drop_id ?? p?.dropId ?? p?.drop;
-          const drop_id = Number(rawDrop);
-          if (!Number.isFinite(drop_id)) return null;
-          const can_ingest = Boolean(p?.can_ingest ?? p?.ingest ?? false);
-          const can_query = Boolean(p?.can_query ?? p?.query ?? false);
-          if (!can_ingest && !can_query) return null;
-          return { drop_id: Math.floor(drop_id), can_ingest, can_query };
-        })
-        .filter(Boolean) as Array<{ drop_id: number; can_ingest: boolean; can_query: boolean }>;
-
-      const existing = new Set(listDrops().map((d) => d.id));
-      for (const p of normalized) {
-        if (!existing.has(p.drop_id)) {
-          res.status(400).json({ error: `Unknown drop_id ${p.drop_id}` });
-          return;
-        }
-      }
-
-      if (normalized.length === 0) {
-        res.status(400).json({ error: 'Member users must be created with at least one drop permission' });
-        return;
-      }
-
-      if (normalized.length > 0) {
-        setUserDropPermissions(userId, normalized);
-      }
+      setUserDropPermissions(userId, normalized);
     }
 
     res.status(201).json(profile);
@@ -276,7 +278,16 @@ adminRouter.put('/auth-policy', (req: Request, res: Response) => {
   setAppSetting('raphael.auth.allowed_domains', JSON.stringify(allowed_domains));
   setAppSetting('raphael.auth.allowed_emails', JSON.stringify(allowed_emails));
   setAppSetting('raphael.auth.oauth_default_permissions', JSON.stringify(default_permissions));
-  res.json({ allowed_domains, allowed_emails, default_permissions });
+
+  const revokedUserIds = isOauthAllowlistEnforced()
+    ? listUserProfiles()
+        .filter((user) => user.user_id !== req.auth?.user?.id)
+        .filter((user) => !isAllowed(user.email))
+        .map((user) => user.user_id)
+    : [];
+  const sessions_revoked = revokedUserIds.length > 0 ? deleteSessionsForUsers(revokedUserIds) : 0;
+
+  res.json({ allowed_domains, allowed_emails, default_permissions, sessions_revoked });
 });
 
 adminRouter.get('/users/:id/permissions', (req: Request, res: Response) => {

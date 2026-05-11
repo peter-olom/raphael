@@ -23,6 +23,7 @@ import {
   clearAll,
   listDrops,
   listUserDropPermissions,
+  compactDatabase,
   deleteDrop,
   setDropLabel,
   setDropRetentionMs,
@@ -314,10 +315,9 @@ apiRouter.get('/dashboards/:dashboardId', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/dashboards', (req: Request, res: Response) => {
-  if (!requireAuth(req, res)) return;
+  if (!requireAdmin(req, res)) return;
   const dropId = getDropId(req, res);
   if (dropId === null) return;
-  if (!requireDropAccess(req, res, dropId, 'query')) return;
   try {
     const name = (req.body?.name ?? '').toString();
     const specJson = JSON.stringify(req.body?.spec ?? {});
@@ -329,10 +329,9 @@ apiRouter.post('/dashboards', (req: Request, res: Response) => {
 });
 
 apiRouter.put('/dashboards/:dashboardId', (req: Request, res: Response) => {
-  if (!requireAuth(req, res)) return;
+  if (!requireAdmin(req, res)) return;
   const dropId = getDropId(req, res);
   if (dropId === null) return;
-  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const raw = (req.params as any).dashboardId as string | string[];
   const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
   if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
@@ -349,10 +348,9 @@ apiRouter.put('/dashboards/:dashboardId', (req: Request, res: Response) => {
 });
 
 apiRouter.delete('/dashboards/:dashboardId', (req: Request, res: Response) => {
-  if (!requireAuth(req, res)) return;
+  if (!requireAdmin(req, res)) return;
   const dropId = getDropId(req, res);
   if (dropId === null) return;
-  if (!requireDropAccess(req, res, dropId, 'query')) return;
   const raw = (req.params as any).dashboardId as string | string[];
   const dashboardId = Number.parseInt(Array.isArray(raw) ? raw[0] : raw, 10);
   if (!Number.isFinite(dashboardId)) return res.status(400).json({ error: 'Invalid dashboard id' });
@@ -373,11 +371,15 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
   const useAi = Boolean(req.body?.use_ai ?? false);
 
   // Sample: last N events (by created_at)
-  const sample = getRecentWideEvents(dropId, limit, 0) as any[];
+  const sample = getRecentWideEvents(dropId, limit, 0, 20_000) as any[];
   const profiles = profileWideEvents(sample);
 
   try {
     if (useAi) {
+      if (!requireAdmin(req, res)) return;
+      if (!req.body?.ack_external_ai) {
+        return res.status(400).json({ error: 'External AI generation requires explicit acknowledgement' });
+      }
       const storedKey = getAppSetting('openrouter_api_key');
       const apiKey = storedKey ? decryptSecret(storedKey) : process.env.OPENROUTER_API_KEY;
       if (!apiKey) return res.status(400).json({ error: 'OPENROUTER_API_KEY is not set' });
@@ -391,6 +393,15 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
     return res.json({ spec, profiles });
   } catch (error) {
     return res.status(500).json({ error: (error as Error).message || 'Failed to generate dashboard' });
+  }
+});
+
+apiRouter.post('/maintenance/compact', (_req: Request, res: Response) => {
+  if (!requireAdmin(_req, res)) return;
+  try {
+    res.json(compactDatabase());
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message || 'Failed to compact database' });
   }
 });
 

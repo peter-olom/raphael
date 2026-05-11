@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { insertWideEventRows, resolveDropId, type WideEventInsertRow } from '../db/sqlite.js';
 import { broadcast, hasSubscribers } from '../websocket.js';
 import { authEnabled, noteApiKeyUsageDrop, requireAuth, requireDropAccess } from '../auth.js';
+import { checkIngestRateLimit } from '../ingestRateLimit.js';
 
 export const eventsRouter = Router();
 
@@ -9,6 +10,10 @@ function parsePositiveInt(raw: unknown, fallback: number) {
   const n = raw === undefined ? fallback : Number(raw);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.floor(n);
+}
+
+function ingestMaxItems() {
+  return parsePositiveInt(process.env.RAPHAEL_INGEST_MAX_ITEMS, 5000);
 }
 
 function makeRingBuffer<T>(max: number) {
@@ -61,6 +66,13 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
     noteApiKeyUsageDrop(req, dropId);
     if (!requireDropAccess(req, res, dropId, 'ingest')) return;
     const events = Array.isArray(req.body) ? req.body : [req.body];
+    const maxItems = ingestMaxItems();
+    if (events.length > maxItems) {
+      res.status(413).json({ error: `Too many events in one request (max ${maxItems})` });
+      return;
+    }
+    if (!checkIngestRateLimit(req, res, events.length)) return;
+
     const rows: WideEventInsertRow[] = [];
 
     const shouldBroadcast = hasSubscribers(dropId);
@@ -116,6 +128,11 @@ eventsRouter.post('/v1/events', (req: Request, res: Response) => {
     }
 
     if (rows.length > 0) {
+      const maxItems = ingestMaxItems();
+      if (rows.length > maxItems) {
+        res.status(413).json({ error: `Too many wide events in one request (max ${maxItems})` });
+        return;
+      }
       insertWideEventRows(rows);
     }
 
@@ -148,6 +165,14 @@ eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
     noteApiKeyUsageDrop(req, dropId);
     if (!requireDropAccess(req, res, dropId, 'ingest')) return;
     const body = req.body;
+    const recordCount = countLogRecords(body);
+    const maxItems = ingestMaxItems();
+    if (recordCount > maxItems) {
+      res.status(413).json({ error: `Too many log records in one request (max ${maxItems})` });
+      return;
+    }
+    if (!checkIngestRateLimit(req, res, recordCount)) return;
+
     const rows: WideEventInsertRow[] = [];
 
     const shouldBroadcast = hasSubscribers(dropId);
@@ -216,6 +241,11 @@ eventsRouter.post('/v1/logs', (req: Request, res: Response) => {
     }
 
     if (rows.length > 0) {
+      const maxItems = ingestMaxItems();
+      if (rows.length > maxItems) {
+        res.status(413).json({ error: `Too many wide events in one request (max ${maxItems})` });
+        return;
+      }
       insertWideEventRows(rows);
     }
 
@@ -238,6 +268,16 @@ function extractServiceName(resource?: { attributes?: Array<{ key: string; value
   if (!resource?.attributes) return 'unknown';
   const serviceAttr = resource.attributes.find(a => a.key === 'service.name');
   return serviceAttr?.value?.stringValue || 'unknown';
+}
+
+function countLogRecords(body: any) {
+  let count = 0;
+  for (const resourceLog of body?.resourceLogs || []) {
+    for (const scopeLog of resourceLog.scopeLogs || []) {
+      count += scopeLog.logRecords?.length ?? 0;
+    }
+  }
+  return count;
 }
 
 function hexToUuid(hex: string): string {
