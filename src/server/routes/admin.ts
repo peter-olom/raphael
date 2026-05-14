@@ -12,6 +12,8 @@ import {
   updateUserRole,
   setAppSetting,
   createUserProfileIfMissing,
+  getTraceSpanDedupStatus,
+  dedupeTraceSpans,
 } from '../db/sqlite.js';
 import { getRetentionSchedulerStatus } from '../retention.js';
 import { authEnabled, getAuth, isOauthAllowlistEnforced, requireAdmin, requireAuth } from '../auth.js';
@@ -69,6 +71,26 @@ function isProtectedAdminEmail(email: string) {
 adminRouter.get('/retention', (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
   res.json(getRetentionSchedulerStatus());
+});
+
+adminRouter.get('/maintenance/trace-dedup', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  res.json(getTraceSpanDedupStatus());
+});
+
+adminRouter.post('/maintenance/trace-dedup', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    res.json(
+      dedupeTraceSpans({
+        id_window_size: req.body?.id_window_size,
+        max_runtime_ms: req.body?.max_runtime_ms,
+        start_after_id: req.body?.start_after_id,
+      })
+    );
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message || 'Failed to deduplicate traces' });
+  }
 });
 
 adminRouter.get('/me', (req: Request, res: Response) => {

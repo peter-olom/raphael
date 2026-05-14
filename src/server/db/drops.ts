@@ -343,16 +343,19 @@ function getFreelistPages() {
 function shouldRunFullVacuum(freePages: number, explicit?: boolean) {
   if (explicit !== undefined) return explicit;
   if (isTruthy(process.env.RAPHAEL_SQLITE_FULL_VACUUM)) return true;
-  const threshold = parsePositiveInt(process.env.RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES, 2048);
-  return freePages >= threshold;
+  return false;
 }
 
 export function compactDatabase(options: { full?: boolean; reason?: string } = {}) {
   checkpointDatabase(true);
   const beforeFreePages = getFreelistPages();
+  const incrementalPages = Math.min(
+    beforeFreePages,
+    parsePositiveInt(process.env.RAPHAEL_SQLITE_INCREMENTAL_VACUUM_MAX_PAGES, 2048)
+  );
   try {
-    if (beforeFreePages > 0) {
-      db.pragma(`incremental_vacuum(${beforeFreePages})`);
+    if (incrementalPages > 0) {
+      db.pragma(`incremental_vacuum(${incrementalPages})`);
     }
   } catch {
     // Older databases may not have incremental auto-vacuum enabled.
@@ -367,6 +370,7 @@ export function compactDatabase(options: { full?: boolean; reason?: string } = {
     success: true,
     reason: options.reason ?? 'manual',
     freelist_pages_before: beforeFreePages,
+    incremental_vacuum_pages: incrementalPages,
     freelist_pages_after: getFreelistPages(),
   };
 }

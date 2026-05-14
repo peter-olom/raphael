@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import express from 'express';
+import Database from 'better-sqlite3';
 
 const tempDir = mkdtempSync(path.join(tmpdir(), 'raphael-test-'));
 
@@ -151,6 +152,32 @@ test('duplicate span ingestion is ignored per drop, trace, and span', () => {
 
   const rows = sqlite.getTraceById(sqlite.DEFAULT_DROP_ID, 'trace-1') as unknown[];
   assert.equal(rows.length, 1);
+});
+
+test('duplicate span maintenance advances in bounded windows', () => {
+  const db = new Database(sqlite.DB_PATH);
+  try {
+    db.prepare(`
+      INSERT INTO traces (drop_id, trace_id, span_id, parent_span_id, service_name, operation_name, start_time, end_time, duration_ms, status, attributes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(sqlite.DEFAULT_DROP_ID, 'trace-maint', 'span-maint', null, 'api', 'GET /maintenance', 1, 2, 1, 'ok', '{}');
+    db.prepare(`
+      INSERT INTO traces (drop_id, trace_id, span_id, parent_span_id, service_name, operation_name, start_time, end_time, duration_ms, status, attributes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(sqlite.DEFAULT_DROP_ID, 'trace-maint', 'span-maint', null, 'api', 'GET /maintenance', 1, 2, 1, 'ok', '{}');
+  } finally {
+    db.close();
+  }
+
+  const before = sqlite.getTraceById(sqlite.DEFAULT_DROP_ID, 'trace-maint') as unknown[];
+  assert.equal(before.length, 2);
+
+  const result = sqlite.dedupeTraceSpans({ id_window_size: 100, max_runtime_ms: 1000, start_after_id: 0 });
+  assert.equal(result.traces_deleted, 1);
+  assert.ok(result.cursor_end_id > 0);
+
+  const after = sqlite.getTraceById(sqlite.DEFAULT_DROP_ID, 'trace-maint') as unknown[];
+  assert.equal(after.length, 1);
 });
 
 test('empty searches return no rows instead of broad scans', () => {

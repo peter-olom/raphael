@@ -3225,7 +3225,7 @@ export default function App() {
                         </div>
                         <div style={styles.paneBody}>
                           <div style={{ color: '#888', fontSize: '13px', marginBottom: '14px' }}>
-                            Set days to keep per drop (0 disables). Saving triggers an immediate prune.
+                            Set days to keep per drop (0 disables). Cleanup runs in the background.
                           </div>
 
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>

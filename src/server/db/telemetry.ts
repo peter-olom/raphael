@@ -1,9 +1,24 @@
-import { db, isTruthy, clampLimit, clampOffset } from './core.js';
+import { db, isTruthy, clampLimit, clampOffset, parsePositiveInt } from './core.js';
+import { getAppSetting, setAppSetting } from './settings.js';
+
+function clampInt(raw: unknown, fallback: number, min: number, max: number) {
+  const n = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
 
 // Prepared statements for inserts
 const insertTraceStmt = db.prepare(`
   INSERT OR IGNORE INTO traces (drop_id, trace_id, span_id, parent_span_id, service_name, operation_name, start_time, end_time, duration_ms, status, attributes)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM traces
+    WHERE drop_id = ?
+      AND trace_id = ?
+      AND span_id IS ?
+    LIMIT 1
+  )
 `);
 
 const insertWideEventStmt = db.prepare(`
@@ -52,7 +67,10 @@ const insertTracesTx = db.transaction((rows: TraceInsertRow[]) => {
       r.end_time,
       r.duration_ms,
       r.status,
-      r.attributes
+      r.attributes,
+      r.drop_id,
+      r.trace_id,
+      r.span_id
     );
   }
 });
@@ -282,4 +300,124 @@ export function clearAll(dropId?: number) {
   }
   db.prepare('DELETE FROM traces WHERE drop_id = ?').run(dropId);
   db.prepare('DELETE FROM wide_events WHERE drop_id = ?').run(dropId);
+}
+
+const TRACE_SPAN_DEDUP_CURSOR_SETTING = 'raphael.trace_span_dedup.cursor';
+
+function parseSettingInt(value: string | undefined, fallback: number) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+
+function isSqliteBusy(error: unknown) {
+  const code = (error as any)?.code?.toString?.() ?? '';
+  const message = (error as Error)?.message ?? '';
+  return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED' || /database is locked|database table is locked/i.test(message);
+}
+
+export interface TraceSpanDedupStatus {
+  cursor_id: number;
+  max_trace_id: number;
+  complete: boolean;
+}
+
+export interface TraceSpanDedupResult extends TraceSpanDedupStatus {
+  cursor_start_id: number;
+  cursor_end_id: number;
+  windows_scanned: number;
+  traces_deleted: number;
+  runtime_ms: number;
+  timed_out: boolean;
+  busy: boolean;
+}
+
+const deleteDuplicateTraceSpansWindow = db.prepare(`
+  DELETE FROM traces
+  WHERE id > ?
+    AND id <= ?
+    AND span_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM traces keep
+      WHERE keep.drop_id = traces.drop_id
+        AND keep.trace_id = traces.trace_id
+        AND keep.span_id IS traces.span_id
+        AND keep.id < traces.id
+      LIMIT 1
+    )
+`);
+
+function getMaxTraceId() {
+  const row = db.prepare(`SELECT COALESCE(MAX(id), 0) AS max_id FROM traces`).get() as { max_id: number };
+  return Number(row?.max_id ?? 0);
+}
+
+export function getTraceSpanDedupStatus(): TraceSpanDedupStatus {
+  const cursorId = parseSettingInt(getAppSetting(TRACE_SPAN_DEDUP_CURSOR_SETTING), 0);
+  const maxTraceId = getMaxTraceId();
+  return {
+    cursor_id: cursorId,
+    max_trace_id: maxTraceId,
+    complete: cursorId >= maxTraceId,
+  };
+}
+
+export function dedupeTraceSpans(options: { id_window_size?: unknown; max_runtime_ms?: unknown; start_after_id?: unknown } = {}) {
+  const windowSize = clampInt(
+    options.id_window_size ?? process.env.RAPHAEL_TRACE_DEDUP_ID_WINDOW_SIZE,
+    parsePositiveInt(process.env.RAPHAEL_TRACE_DEDUP_ID_WINDOW_SIZE, 10_000),
+    100,
+    100_000
+  );
+  const maxRuntimeMs = clampInt(
+    options.max_runtime_ms ?? process.env.RAPHAEL_TRACE_DEDUP_MAX_RUNTIME_MS,
+    parsePositiveInt(process.env.RAPHAEL_TRACE_DEDUP_MAX_RUNTIME_MS, 500),
+    25,
+    30_000
+  );
+  const maxTraceId = getMaxTraceId();
+  const requestedStartAfterId = Number(options.start_after_id);
+  const cursorStartId = Math.max(
+    0,
+    Math.floor(
+      Number.isFinite(requestedStartAfterId)
+        ? requestedStartAfterId
+        : parseSettingInt(getAppSetting(TRACE_SPAN_DEDUP_CURSOR_SETTING), 0)
+    )
+  );
+  const startedAt = Date.now();
+  const deadline = startedAt + maxRuntimeMs;
+  let cursorId = Math.min(cursorStartId, maxTraceId);
+  let tracesDeleted = 0;
+  let windowsScanned = 0;
+  let busy = false;
+
+  while (cursorId < maxTraceId && Date.now() < deadline) {
+    const windowEndId = Math.min(cursorId + windowSize, maxTraceId);
+    try {
+      const changes = deleteDuplicateTraceSpansWindow.run(cursorId, windowEndId).changes;
+      tracesDeleted += changes;
+      windowsScanned++;
+      cursorId = windowEndId;
+      setAppSetting(TRACE_SPAN_DEDUP_CURSOR_SETTING, String(cursorId));
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      busy = true;
+      break;
+    }
+  }
+
+  return {
+    cursor_id: cursorId,
+    cursor_start_id: cursorStartId,
+    cursor_end_id: cursorId,
+    max_trace_id: maxTraceId,
+    complete: cursorId >= maxTraceId,
+    windows_scanned: windowsScanned,
+    traces_deleted: tracesDeleted,
+    runtime_ms: Date.now() - startedAt,
+    timed_out: Date.now() >= deadline && cursorId < maxTraceId,
+    busy,
+  } satisfies TraceSpanDedupResult;
 }

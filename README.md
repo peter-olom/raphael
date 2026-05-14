@@ -206,7 +206,10 @@ curl -X POST http://localhost:6274/v1/events \
 | `RAPHAEL_PRUNE_BATCH_SIZE`                | `1000`              | Retention delete batch size (capped to 100..50000)           |
 | `RAPHAEL_PRUNE_MAX_RUNTIME_MS`            | `100`               | Time budget per pruning run (capped to 25..5000ms)           |
 | `RAPHAEL_SQLITE_FULL_VACUUM`               | `false`             | Force full SQLite VACUUM during compaction                   |
-| `RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES` | `2048`             | Full VACUUM threshold when incremental reclaim is insufficient |
+| `RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES` | `2048`             | Legacy setting; full VACUUM now requires explicit opt-in      |
+| `RAPHAEL_SQLITE_INCREMENTAL_VACUUM_MAX_PAGES` | `2048`         | Max free pages to reclaim per manual incremental vacuum      |
+| `RAPHAEL_TRACE_DEDUP_ID_WINDOW_SIZE`      | `10000`             | Trace id window scanned per manual duplicate cleanup batch   |
+| `RAPHAEL_TRACE_DEDUP_MAX_RUNTIME_MS`      | `500`               | Time budget per manual duplicate cleanup run                 |
 
 ## Hosting Raphael
 
@@ -234,6 +237,8 @@ See `docs/hosting.md` for a simple Docker hosting setup (non-root, read-only roo
 - Each Drop has independent retention rules (defaults: traces **3 days**, events **7 days**) configurable in the UI.
 
 Retention cleanup is intentionally low impact: it only runs in the background scheduler, never in dashboard/list/query request paths, and retention setting changes do not prune inline. Each run is time-budgeted, uses indexed `(drop_id, created_at)` predicates, alternates trace/event delete batches, and backs off on SQLite busy/lock errors. For maintenance windows, temporarily increase `RAPHAEL_PRUNE_BATCH_SIZE` and `RAPHAEL_PRUNE_MAX_RUNTIME_MS`; automatic `VACUUM` is not run during normal operation.
+
+Trace span deduplication is also kept out of startup. New duplicate spans are ignored on ingest, and older duplicates can be cleaned with the admin maintenance endpoint in bounded id windows during a maintenance window.
 
 Notes:
 

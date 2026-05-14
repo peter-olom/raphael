@@ -14,7 +14,10 @@ export {
   searchWideEvents,
   getStats,
   clearAll,
+  getTraceSpanDedupStatus,
+  dedupeTraceSpans,
 } from './telemetry.js';
+export type { TraceSpanDedupStatus, TraceSpanDedupResult } from './telemetry.js';
 export type { RetentionPruneResult } from './drops.js';
 export {
   listDrops,

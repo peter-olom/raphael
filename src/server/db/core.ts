@@ -388,19 +388,6 @@ try {
   console.warn('api_keys migration failed:', error);
 }
 
-runMigration('trace-span-dedup-2026-05-11', () => {
-  db.exec(`
-    DELETE FROM traces
-    WHERE span_id IS NOT NULL
-      AND id NOT IN (
-        SELECT MIN(id)
-        FROM traces
-        WHERE span_id IS NOT NULL
-        GROUP BY drop_id, trace_id, span_id
-      );
-  `);
-});
-
 // Indexes that depend on drop_id (must run after migrations)
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_settings_updated ON app_settings(updated_at DESC);
@@ -419,7 +406,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_traces_drop_status_id ON traces(drop_id, status, id DESC);
   CREATE INDEX IF NOT EXISTS idx_traces_drop_operation_id ON traces(drop_id, operation_name, id DESC);
   CREATE INDEX IF NOT EXISTS idx_traces_service ON traces(service_name);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_traces_unique_span ON traces(drop_id, trace_id, span_id) WHERE span_id IS NOT NULL;
 
   CREATE INDEX IF NOT EXISTS idx_events_drop_created ON wide_events(drop_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_events_drop_id ON wide_events(drop_id, id DESC);
