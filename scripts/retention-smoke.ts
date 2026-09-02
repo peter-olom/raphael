@@ -22,11 +22,13 @@ process.env.RAPHAEL_PRUNE_MAX_RUNTIME_MS = String(maxMs);
 
 const dbm = await import('../src/server/db/sqlite.js');
 const dropId = dbm.resolveDropId('retention-smoke', true) ?? 1;
+const secondDropId = dbm.resolveDropId('retention-smoke-second', true) ?? 2;
 const now = Date.now();
 const oldCreatedAt = now - 7 * 24 * 60 * 60 * 1000;
 const newCreatedAt = now;
 
 dbm.setDropRetentionMs(dropId, 60 * 60 * 1000, 60 * 60 * 1000);
+dbm.setDropRetentionMs(secondDropId, 60 * 60 * 1000, 60 * 60 * 1000);
 
 for (let i = 0; i < traces; i += 10_000) {
   const end = Math.min(traces, i + 10_000);
@@ -102,6 +104,15 @@ assert.ok(result.events_deleted > 0, 'wide-event cleanup should get prune time e
 assert.ok(result.traces_deleted + result.events_deleted <= result.batches * Math.max(100, Math.min(batch, 50_000)), 'deleted rows should be bounded by recorded batches');
 assert.equal(newTraceSurvivors, 10, 'new trace rows must not be pruned');
 assert.equal(newEventSurvivors, 10, 'new event rows must not be pruned');
+
+const rotatedResults = dbm.pruneByRetention(undefined, now, {
+  startAfterDropId: dropId,
+});
+assert.equal(
+  rotatedResults[0]?.drop_id,
+  secondDropId,
+  'automatic retention should resume with the drop after the last attempted drop'
+);
 
 console.log(JSON.stringify({
   seeded: { traces: beforeTraces, events: beforeEvents },

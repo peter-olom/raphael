@@ -253,8 +253,23 @@ export function getRetentionPruneConfig() {
   };
 }
 
-export function pruneByRetention(dropId?: number, now = Date.now()) {
-  const drops = dropId === undefined ? (db.prepare(`SELECT id FROM drops`).all() as Array<{ id: number }>) : [{ id: dropId }];
+export function pruneByRetention(
+  dropId?: number,
+  now = Date.now(),
+  options: { startAfterDropId?: number | null } = {}
+) {
+  let drops =
+    dropId === undefined
+      ? (db.prepare(`SELECT id FROM drops ORDER BY id`).all() as Array<{ id: number }>)
+      : [{ id: dropId }];
+
+  if (dropId === undefined && drops.length > 1 && options.startAfterDropId !== undefined) {
+    const previousIndex = drops.findIndex((drop) => drop.id === options.startAfterDropId);
+    if (previousIndex >= 0) {
+      const nextIndex = (previousIndex + 1) % drops.length;
+      drops = [...drops.slice(nextIndex), ...drops.slice(0, nextIndex)];
+    }
+  }
 
   const results: RetentionPruneResult[] = [];
 

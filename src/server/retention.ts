@@ -46,6 +46,7 @@ let busyRuns = 0;
 let errorRuns = 0;
 let lastError: string | null = null;
 let lastResults: RetentionPruneResult[] = [];
+let lastPrunedDropId: number | null = null;
 
 function summarize(results: RetentionPruneResult[]) {
   return results.reduce(
@@ -84,8 +85,13 @@ export async function runRetentionOnce(reason = 'manual') {
   lastStartedAt = Date.now();
   nextRunAt = null;
   try {
-    const results = pruneByRetention(undefined, Date.now());
+    const results = pruneByRetention(undefined, Date.now(), {
+      startAfterDropId: lastPrunedDropId,
+    });
     lastResults = results;
+    if (results.length > 0) {
+      lastPrunedDropId = results[results.length - 1].drop_id;
+    }
     const summary = summarize(results);
     if (summary.busy) busyRuns++;
     lastError = null;
