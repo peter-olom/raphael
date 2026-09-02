@@ -48,5 +48,8 @@
     "typescript": "^5.7.3",
     "vite": "^6.4.2"
   },
+  "overrides": {
+    "qs": "6.16.0"
+  },
   "packageManager": "npm@11.7.0"
 }
