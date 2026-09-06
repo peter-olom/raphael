@@ -22,7 +22,7 @@
     "test:retention-paths": "tsx scripts/retention-paths-smoke.ts"
   },
   "dependencies": {
-    "better-auth": "^1.6.10",
+    "better-auth": "1.7.3",
     "better-sqlite3": "^12.9.0",
     "cors": "^2.8.6",
     "express": "^4.21.2",
