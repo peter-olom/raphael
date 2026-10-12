@@ -1,0 +1,25 @@
+button, input, select, textarea { font: inherit; }
+button { min-height: 36px; }
+button:not(:disabled):hover { filter: brightness(1.18); }
+button:disabled { opacity: .5; cursor: not-allowed !important; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #a5b4fc !important; outline-offset: 3px; }
+.settings-page { width: 100%; }
+.settings-page > div { grid-template-columns: 1fr !important; }
+.settings-page input, .settings-page textarea { max-width: 100%; }
+.dashboard-page > div { min-width: 0; }
+@media (max-width: 900px) {
+  .settings-page div[style*="grid-template-columns"], .dashboard-page div[style*="grid-template-columns"] { grid-template-columns: 1fr !important; }
+  .settings-page nav { gap: 4px !important; }
+  .dashboard-page label { flex-wrap: wrap; }
+}
+@media (max-width: 600px) {
+  header { position: static !important; height: auto !important; flex-wrap: wrap; }
+  input, select { min-width: 0 !important; max-width: 100%; }
+  .settings-page, .dashboard-page { overflow-wrap: anywhere; }
+}
+.app-tabs { overflow-x: auto; }
+.app-tabs > button { flex-shrink: 0; }
+@media (max-width: 600px) {
+  .app-navigation { position: static !important; }
+  .app-tabs > button { padding: 12px 14px !important; }
+}

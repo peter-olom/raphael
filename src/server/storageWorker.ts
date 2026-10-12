@@ -43,7 +43,8 @@ async function directorySync() {
 }
 const commit = db.transaction((batch: IngestBatch, filename: string, payloadBytes: number) => {
   if (db.prepare('SELECT id FROM ingest_receipts WHERE id = ?').get(batch.id)) return null;
-  const published: { traces: any[]; wide_events: any[] } = { traces: [], wide_events: [] };
+  const published: { traces: any[]; wide_events: any[]; counts: Array<{ drop_id: number; traces: number; wideEvents: number; errors: number }>; commitCursor: number } = { traces: [], wide_events: [], counts: [], commitCursor: 0 };
+  const dropCounts = new Map<number, { drop_id: number; traces: number; wideEvents: number; errors: number }>();
   const requestedLimit = Number(process.env.RAPHAEL_INGEST_BROADCAST_MAX_ITEMS || 500);
   const publishLimit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0 ? Math.min(500, requestedLimit) : 500;
   const now = Date.now();
@@ -64,6 +65,15 @@ const commit = db.transaction((batch: IngestBatch, filename: string, payloadByte
       const statement = kind === 'traces' ? traceInsert : eventInsert;
       const inserted = statement.run(record);
       counts[kind] += inserted.changes;
+      if (inserted.changes) {
+        const delta = dropCounts.get(row.drop_id) ?? { drop_id: row.drop_id, traces: 0, wideEvents: 0, errors: 0 };
+        if (kind === 'traces') delta.traces += inserted.changes;
+        else {
+          delta.wideEvents += inserted.changes;
+          if ('outcome' in record && record.outcome === 'error') delta.errors += inserted.changes;
+        }
+        dropCounts.set(row.drop_id, delta);
+      }
       const target = kind === 'traces' ? published.traces : published.wide_events;
       if (inserted.changes && target.length < publishLimit) target.push({ ...record, id: Number(inserted.lastInsertRowid) });
     }
@@ -76,6 +86,8 @@ const commit = db.transaction((batch: IngestBatch, filename: string, payloadByte
   db.prepare('INSERT INTO ingest_receipts (id, filename, committed_at, payload_bytes) VALUES (?, ?, ?, ?)').run(batch.id, filename, now, payloadBytes);
   db.prepare(`UPDATE telemetry_storage_state SET stored_traces = stored_traces + ?, stored_events = stored_events + ?, expired_traces = expired_traces + ?, expired_events = expired_events + ?, missing_drop_records = missing_drop_records + ?, last_commit_at = ? WHERE id = 1`)
     .run(counts.traces, counts.events, counts.expired_traces, counts.expired_events, counts.missing, now);
+  published.counts = [...dropCounts.values()];
+  published.commitCursor = (db.prepare('SELECT stored_traces + stored_events AS cursor FROM telemetry_storage_state WHERE id = 1').get() as { cursor: number }).cursor;
   return published;
 });
 let grant: (() => void) | null = null;

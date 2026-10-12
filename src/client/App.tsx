@@ -1,17 +1,20 @@
+import { FilterBar } from './FilterBar';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createAuthClient } from 'better-auth/client';
 import type { DashboardRow, DashboardSpecV1, WidgetSpec } from './dashboards/types';
 import { computeWidget, parseDashboardSpec } from './dashboards/render';
-import GridLayout, { useContainerWidth, type Layout } from 'react-grid-layout';
+import GridLayout, { type Layout } from 'react-grid-layout';
 import { styles } from './styles';
 import type { Drop, Stats, Tab, Trace, WideEvent } from './types';
 import { DASHBOARD_COLS, DASHBOARD_ROW_HEIGHT, addPlacedWidget, clampInt, defaultWidgetLayout, normalizeDashboardSpec } from './dashboardLayout';
-import { applyFilters, computeFieldStats, normalizeFilterKey, type FilterSetter, type FilterState } from './filters';
+import { normalizeFilterKey, type FilterSetter, type FilterState } from './filters';
 import { fetchJson, formatNumber, truncate } from './utils';
 import { EventDetailModal, TraceDetailModal, type Selected } from './DetailModals';
 import { EventsTable, TracesTable } from './TelemetryTables';
 
 const LIST_PAGE_SIZE = 100;
+const MAX_PENDING_STATS_DELTAS = 256;
+type StatsDelta = { traces: number; wideEvents: number; errors: number; commitCursor: number };
 
 export default function App() {
   type SettingsTab = 'account' | 'drops' | 'service_accounts' | 'auth' | 'users' | 'integrations';
@@ -47,6 +50,7 @@ export default function App() {
   const initialDropId = initialDropRaw && /^\d+$/.test(initialDropRaw) ? Number.parseInt(initialDropRaw, 10) : null;
 
   const [tab, setTab] = useState<Tab>(initialTab);
+  const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(initialSettingsTab);
   const [authEnabled, setAuthEnabled] = useState<boolean | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>('disabled');
@@ -133,9 +137,20 @@ export default function App() {
   const dropIdRef = useRef<number | null>(null);
   const dataRequestSeqRef = useRef(0);
   const dashboardRequestSeqRef = useRef(0);
+  const listAbortRef = useRef<AbortController | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const streamViewRef = useRef(false);
+  const statsRequestRef = useRef<{ controller: AbortController; dropId: number; deltas: StatsDelta[]; overflowed: boolean } | null>(null);
+  const statsCursorRef = useRef<number | null>(null);
+  const statsLastFetchRef = useRef(0);
+  const refreshStatsRef = useRef<(force?: boolean) => Promise<void>>(async () => {});
+  const fetchDataRef = useRef<() => Promise<void>>(async () => {});
+  const [statsError, setStatsError] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [eventFilters, setEventFilters] = useState<FilterState>({});
   const [traceFilters, setTraceFilters] = useState<FilterState>({});
+  streamViewRef.current = (tab === 'events' || tab === 'traces') && !search.trim() && Object.keys(tab === 'events' ? eventFilters : traceFilters).length === 0;
+
   const [newDropName, setNewDropName] = useState('');
   const [dropLabelDraft, setDropLabelDraft] = useState('');
   const [dropLabelSaving, setDropLabelSaving] = useState(false);
@@ -147,15 +162,14 @@ export default function App() {
   const [selected, setSelected] = useState<Selected | null>(null);
   const [dashboards, setDashboards] = useState<DashboardRow[]>([]);
   const [dashboardSelectedId, setDashboardSelectedId] = useState<number | null>(null);
+  const dashboardSelectedIdRef = useRef<number | null>(null);
+  dashboardSelectedIdRef.current = dashboardSelectedId;
   const [dashboardSpec, setDashboardSpec] = useState<DashboardSpecV1 | null>(null);
   const [dashboardName, setDashboardName] = useState('');
   const [dashboardSample, setDashboardSample] = useState<WideEvent[]>([]);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardEditingWidgetId, setDashboardEditingWidgetId] = useState<string | null>(null);
-  const [dashboardMode, setDashboardMode] = useState<'view' | 'edit'>(() => {
-    const stored = window.localStorage.getItem('raphael.dashboardMode');
-    return stored === 'edit' ? 'edit' : 'view';
-  });
+  const [dashboardMode, setDashboardMode] = useState<'view' | 'edit'>('view');
   const [showNewDashboard, setShowNewDashboard] = useState(false);
   const [newDashboardName, setNewDashboardName] = useState('My Dashboard');
   const [showGenerateDashboard, setShowGenerateDashboard] = useState(false);
@@ -316,76 +330,92 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, [tab, settingsTab]);
 
+  const queryString = useMemo(() => new URLSearchParams({
+    q: search.trim(), filters: JSON.stringify(tab === 'traces' ? traceFilters : eventFilters),
+  }).toString(), [search, tab, traceFilters, eventFilters]);
+
+  const refreshStats = useCallback(async (force = false) => {
+    const activeDropId = dropIdRef.current;
+    if (!authReady || dataLocked || activeDropId === null) return;
+    if (!force && statsRequestRef.current?.dropId === activeDropId) return;
+    if (!force && Date.now() - statsLastFetchRef.current < 5000) return;
+    statsRequestRef.current?.controller.abort();
+    const request = { controller: new AbortController(), dropId: activeDropId, deltas: [] as StatsDelta[], overflowed: false };
+    statsRequestRef.current = request;
+    statsLastFetchRef.current = Date.now();
+    try {
+      const value = await fetchJson<Stats>(`/api/stats?dropId=${activeDropId}`, { signal: request.controller.signal });
+      if (request.controller.signal.aborted || activeDropId !== dropIdRef.current) return;
+      if (request.overflowed) {
+        // Preserve the newer live totals instead of applying an incomplete rebase.
+        setStatsError('Too many arrivals during refresh. Retry totals.');
+        return;
+      }
+      if (value.commitCursor !== undefined) {
+        const next = { ...value };
+        for (const delta of request.deltas) {
+          if (delta.commitCursor <= value.commitCursor) continue;
+          next.traces += delta.traces;
+          next.wideEvents += delta.wideEvents;
+          next.errors += delta.errors;
+          next.commitCursor = delta.commitCursor;
+        }
+        statsCursorRef.current = next.commitCursor ?? null;
+        setStats(next);
+      } else {
+        setStats(value);
+      }
+      setStatsError(null);
+    } catch (error) {
+      if (!request.controller.signal.aborted) setStatsError((error as Error).message);
+    } finally {
+      if (statsRequestRef.current === request) statsRequestRef.current = null;
+    }
+  }, [authReady, dataLocked]);
+  refreshStatsRef.current = refreshStats;
+
   const fetchData = useCallback(async () => {
-    if (!authReady) return;
-    if (dataLocked) return;
+    if (!authReady || dataLocked || (tab !== 'events' && tab !== 'traces')) return;
     const activeDropId = dropIdRef.current;
     if (activeDropId === null) return;
+    void refreshStats();
+    listAbortRef.current?.abort();
+    const controller = new AbortController();
+    listAbortRef.current = controller;
     const seq = ++dataRequestSeqRef.current;
     setListLoading(true);
+    setListError(null);
     try {
-      const [tracesJson, eventsJson, nextStats] = await Promise.all([
-        fetchJson<{ items?: Trace[]; nextCursor?: number | null } | Trace[]>(
-          `/api/traces?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&envelope=1`
-        ),
-        fetchJson<{ items?: WideEvent[]; nextCursor?: number | null } | WideEvent[]>(
-          `/api/events?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&envelope=1`
-        ),
-        fetchJson<Stats>(`/api/stats?dropId=${activeDropId}`),
-      ]);
+      const json = await fetchJson<{ items: Array<Trace | WideEvent>; nextCursor: number | null }>(
+        `/api/${tab}?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&envelope=1&${queryString}`, { signal: controller.signal });
       if (seq !== dataRequestSeqRef.current || activeDropId !== dropIdRef.current) return;
-      const nextTraces = Array.isArray(tracesJson) ? tracesJson : tracesJson.items ?? [];
-      const nextEvents = Array.isArray(eventsJson) ? eventsJson : eventsJson.items ?? [];
-      setTraces(Array.isArray(nextTraces) ? nextTraces : []);
-      setEvents(Array.isArray(nextEvents) ? nextEvents : []);
-      setTraceNextCursor(Array.isArray(tracesJson) ? null : tracesJson.nextCursor ?? null);
-      setEventNextCursor(Array.isArray(eventsJson) ? null : eventsJson.nextCursor ?? null);
-      setStats(nextStats);
+      if (tab === 'events') { setEvents(json.items as WideEvent[]); setEventNextCursor(json.nextCursor); }
+      else { setTraces(json.items as Trace[]); setTraceNextCursor(json.nextCursor); }
     } catch (error) {
-      console.error('Failed to fetch data:', error);
-      if (seq === dataRequestSeqRef.current) {
-        setTraces([]);
-        setEvents([]);
-        setTraceNextCursor(null);
-        setEventNextCursor(null);
-        setStats({ traces: 0, wideEvents: 0, errors: 0 });
-      }
+      if (!controller.signal.aborted) setListError((error as Error).message);
     } finally {
       if (seq === dataRequestSeqRef.current) setListLoading(false);
     }
-  }, [authReady, dataLocked]);
+  }, [authReady, dataLocked, tab, queryString, refreshStats]);
+  fetchDataRef.current = fetchData;
 
   const fetchMoreListRows = useCallback(async () => {
-    if (!authReady) return;
-    if (dataLocked) return;
+    if (!authReady || dataLocked || listLoading || (tab !== 'events' && tab !== 'traces')) return;
     const activeDropId = dropIdRef.current;
-    if (activeDropId === null) return;
-    if (tab !== 'events' && tab !== 'traces') return;
     const cursor = tab === 'events' ? eventNextCursor : traceNextCursor;
-    if (!cursor) return;
+    if (activeDropId === null || !cursor) return;
+    const seq = dataRequestSeqRef.current;
+    setPaused(true);
     setListLoading(true);
     try {
-      const resource = tab === 'events' ? 'events' : 'traces';
-      const json = await fetchJson<{ items?: Array<Trace | WideEvent>; nextCursor?: number | null } | Array<Trace | WideEvent>>(
-        `/api/${resource}?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&beforeId=${cursor}&envelope=1`
-      );
-      const items = Array.isArray(json) ? json : json.items ?? [];
-      const nextCursor = Array.isArray(json) ? null : json.nextCursor ?? null;
-      if (activeDropId !== dropIdRef.current) return;
-      if (tab === 'events') {
-        setEvents((prev) => [...prev, ...(items as WideEvent[])]);
-        setEventNextCursor(nextCursor);
-      } else {
-        setTraces((prev) => [...prev, ...(items as Trace[])]);
-        setTraceNextCursor(nextCursor);
-      }
-    } catch (error) {
-      console.error('Failed to fetch older rows:', error);
-      setAppToast('Failed to load older rows');
-    } finally {
-      setListLoading(false);
-    }
-  }, [authReady, dataLocked, tab, eventNextCursor, traceNextCursor]);
+      const json = await fetchJson<{ items: Array<Trace | WideEvent>; nextCursor: number | null }>(
+        `/api/${tab}?dropId=${activeDropId}&limit=${LIST_PAGE_SIZE}&beforeId=${cursor}&envelope=1&${queryString}`);
+      if (seq !== dataRequestSeqRef.current || activeDropId !== dropIdRef.current) return;
+      if (tab === 'events') { setEvents(prev => [...prev, ...json.items as WideEvent[]]); setEventNextCursor(json.nextCursor); }
+      else { setTraces(prev => [...prev, ...json.items as Trace[]]); setTraceNextCursor(json.nextCursor); }
+    } catch (error) { setListError((error as Error).message); }
+    finally { if (seq === dataRequestSeqRef.current) setListLoading(false); }
+  }, [authReady, dataLocked, listLoading, tab, eventNextCursor, traceNextCursor, queryString]);
 
   const fetchDrops = useCallback(async () => {
     if (!authReady) return;
@@ -418,7 +448,7 @@ export default function App() {
       const rows = await fetchJson<DashboardRow[]>(`/api/dashboards?dropId=${activeDropId}`);
       if (seq !== dashboardRequestSeqRef.current || activeDropId !== dropIdRef.current) return;
       setDashboards(rows);
-      if (dashboardSelectedId !== null && !rows.some((d) => d.id === dashboardSelectedId)) {
+      if (dashboardSelectedIdRef.current !== null && !rows.some((d) => d.id === dashboardSelectedIdRef.current)) {
         setDashboardSelectedId(null);
         setDashboardSpec(null);
         setDashboardName('');
@@ -434,7 +464,7 @@ export default function App() {
         setDashboardSample([]);
       }
     }
-  }, [dashboardSelectedId, authReady]);
+  }, [authReady]);
 
   const fetchServiceAccounts = useCallback(async () => {
     if (!authActive || !authUser) return;
@@ -873,32 +903,7 @@ export default function App() {
     }
   }, [refreshAuthAssets]);
 
-  const handleSearch = useCallback(async () => {
-    if (!authReady) return;
-    if (!search.trim()) {
-      fetchData();
-      return;
-    }
-    try {
-      if (dropIdRef.current === null) return;
-      if (tab === 'dashboards' || tab === 'settings') return;
-      if (tab === 'traces') {
-        const rows = await fetchJson<Trace[]>(
-          `/api/search/traces?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}&limit=${LIST_PAGE_SIZE}`
-        );
-        setTraces(Array.isArray(rows) ? rows : []);
-        setTraceNextCursor(null);
-      } else {
-        const rows = await fetchJson<WideEvent[]>(
-          `/api/search/events?dropId=${dropIdRef.current}&q=${encodeURIComponent(search)}&limit=${LIST_PAGE_SIZE}`
-        );
-        setEvents(Array.isArray(rows) ? rows : []);
-        setEventNextCursor(null);
-      }
-    } catch (error) {
-      console.error('Search failed:', error);
-    }
-  }, [search, tab, fetchData, authReady]);
+  const handleSearch = () => { void refreshStats(true); void fetchData(); };
 
   const handleClear = async () => {
     if (!authReady) return;
@@ -906,7 +911,8 @@ export default function App() {
     if (dropIdRef.current === null) return;
     try {
       await fetchJson<{ success: boolean }>(`/api/clear?dropId=${dropIdRef.current}`, { method: 'DELETE' });
-      fetchData();
+      void refreshStats(true);
+      void fetchData();
     } catch (error) {
       setAppToast((error as Error).message || 'Clear failed');
     }
@@ -945,16 +951,63 @@ export default function App() {
     }
 
     setSelected(null);
-    fetchData();
-    fetchDashboards();
     subscribeWs(dropId);
-  }, [dropId, drops, fetchData, subscribeWs, fetchDashboards, authReady, dataLocked]);
+  }, [dropId, drops, subscribeWs, authReady, dataLocked]);
 
   useEffect(() => {
-    if (tab !== 'dashboards') return;
-    if (!dashboardSpec) return;
-    void ensureDashboardDataLoaded();
-  }, [tab, dashboardSpec]);
+    ++dataRequestSeqRef.current;
+    listAbortRef.current?.abort();
+    setListLoading(false);
+    setTraces([]); setEvents([]);
+    setTraceNextCursor(null); setEventNextCursor(null);
+    const timer = window.setTimeout(() => void fetchData(), 250);
+    return () => { window.clearTimeout(timer); listAbortRef.current?.abort(); };
+  }, [dropId, fetchData]);
+
+  useEffect(() => {
+    if (tab === 'dashboards') void fetchDashboards();
+  }, [tab, dropId, fetchDashboards]);
+
+  useEffect(() => {
+    setDashboardSelectedId(null); setDashboardSpec(null); setDashboardSample([]);
+    setStats({ traces: 0, wideEvents: 0, errors: 0 });
+    statsCursorRef.current = null;
+    setStatsError(null);
+    statsLastFetchRef.current = 0;
+    return () => {
+      statsRequestRef.current?.controller.abort();
+      statsRequestRef.current = null;
+    };
+  }, [dropId, refreshStats]);
+
+  useEffect(() => { void refreshStats(true); }, [tab, dropId, refreshStats]);
+
+  useEffect(() => {
+    let lastReturn = 0;
+    const reconcile = () => {
+      if (document.hidden || Date.now() - lastReturn < 250) return;
+      lastReturn = Date.now();
+      void refreshStatsRef.current(true);
+      if (!pausedRef.current) void fetchDataRef.current();
+    };
+    window.addEventListener('focus', reconcile);
+    document.addEventListener('visibilitychange', reconcile);
+    return () => {
+      window.removeEventListener('focus', reconcile);
+      document.removeEventListener('visibilitychange', reconcile);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'dashboards' || !dashboardSpec || dropId === null) return;
+    const controller = new AbortController();
+    setDashboardLoading(true);
+    void fetchJson<WideEvent[]>(`/api/dashboard-sample?dropId=${dropId}&limit=${dashboardSpec.sampleSize ?? 2000}`, { signal: controller.signal })
+      .then(setDashboardSample)
+      .catch(error => { if (!controller.signal.aborted) setAppToast(error.message); })
+      .finally(() => { if (!controller.signal.aborted) setDashboardLoading(false); });
+    return () => controller.abort();
+  }, [tab, dropId, dashboardSelectedId, dashboardSpec?.sampleSize]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -976,20 +1029,14 @@ export default function App() {
     if (tab !== 'settings') return;
     if (!authReady) return;
 
-    if (settingsTab === 'service_accounts') {
-      if (authActive && authUser) void refreshAuthAssets();
-      return;
-    }
+    let cancelled = false;
+    const task = settingsTab === 'service_accounts' && authActive && authUser ? refreshAuthAssets
+      : settingsTab === 'users' && isAdmin ? fetchUsers
+      : settingsTab === 'auth' && isAdmin ? fetchAuthPolicy : null;
+    setSettingsLoading(Boolean(task));
+    if (task) void task().finally(() => { if (!cancelled) setSettingsLoading(false); });
+    return () => { cancelled = true; };
 
-    if (settingsTab === 'users') {
-      if (isAdmin) void fetchUsers();
-      return;
-    }
-
-    if (settingsTab === 'auth') {
-      if (isAdmin) void fetchAuthPolicy();
-      return;
-    }
   }, [tab, authReady, settingsTab, authActive, authUser, isAdmin, refreshAuthAssets, fetchUsers, fetchAuthPolicy]);
 
   useEffect(() => {
@@ -1041,6 +1088,7 @@ export default function App() {
     const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
     let disposed = false;
     let reconnectTimer: number | null = null;
+    let hasConnected = false;
 
     const connect = () => {
       if (disposed) return;
@@ -1051,6 +1099,9 @@ export default function App() {
         setConnected(true);
         console.log('WebSocket connected');
         subscribeWs(dropIdRef.current);
+        void refreshStatsRef.current(hasConnected);
+        if (hasConnected && !document.hidden && !pausedRef.current) void fetchDataRef.current();
+        hasConnected = true;
       };
 
       ws.onclose = () => {
@@ -1061,8 +1112,6 @@ export default function App() {
       };
 
       ws.onmessage = (event) => {
-        if (pausedRef.current) return;
-
         let data: any;
         try {
           data = JSON.parse(event.data);
@@ -1070,6 +1119,27 @@ export default function App() {
           return;
         }
         if (data?.drop_id !== undefined && dropIdRef.current !== null && data.drop_id !== dropIdRef.current) return;
+        // Commit deltas include every inserted row, independent of capped list frames.
+        if (data.type === 'stats_delta') {
+          const delta = data as StatsDelta;
+          if (!Number.isSafeInteger(delta.commitCursor) || delta.commitCursor <= (statsCursorRef.current ?? -1)) return;
+          statsCursorRef.current = delta.commitCursor;
+          const request = statsRequestRef.current;
+          if (request && request.dropId === dropIdRef.current) {
+            if (request.deltas.length < MAX_PENDING_STATS_DELTAS) request.deltas.push(delta);
+            else request.overflowed = true;
+          }
+          setStats(prev => ({ ...prev, traces: prev.traces + delta.traces, wideEvents: prev.wideEvents + delta.wideEvents, errors: prev.errors + delta.errors, commitCursor: delta.commitCursor }));
+          return;
+        }
+        // Older servers publish unmarked row frames without commit metadata.
+        if (data.commitCursor === undefined && data.type === 'traces') {
+          setStats(prev => ({ ...prev, traces: prev.traces + data.data.length }));
+        } else if (data.commitCursor === undefined && data.type === 'wide_events') {
+          const errors = data.data.filter((row: WideEvent) => row.outcome === 'error').length;
+          setStats(prev => ({ ...prev, wideEvents: prev.wideEvents + data.data.length, errors: prev.errors + errors }));
+        }
+        if (pausedRef.current || !streamViewRef.current || document.hidden) return;
 
         if (data.type === 'traces') {
           setTraces((prev) => {
@@ -1079,7 +1149,6 @@ export default function App() {
             }));
             return [...newTraces, ...prev].slice(0, 500);
           });
-          setStats((prev) => ({ ...prev, traces: prev.traces + data.data.length }));
         } else if (data.type === 'wide_events') {
           setEvents((prev) => {
             const newEvents = data.data.map((e: WideEvent) => ({
@@ -1088,12 +1157,6 @@ export default function App() {
             }));
             return [...newEvents, ...prev].slice(0, 500);
           });
-          const errorCount = data.data.filter((e: WideEvent) => e.outcome === 'error').length;
-          setStats((prev) => ({
-            ...prev,
-            wideEvents: prev.wideEvents + data.data.length,
-            errors: prev.errors + errorCount,
-          }));
         }
       };
 
@@ -1120,8 +1183,8 @@ export default function App() {
         ? (setTraceFilters as unknown as FilterSetter)
         : noopFilterSetter;
 
-  const visibleEvents = applyFilters('events', events, eventFilters, search);
-  const visibleTraces = applyFilters('traces', traces, traceFilters, search);
+  const visibleEvents = events;
+  const visibleTraces = traces;
 
   const effectiveDashboardSpec: DashboardSpecV1 | null = dashboardSpec
     ? {
@@ -1163,7 +1226,17 @@ export default function App() {
     return map;
   }, [dashboardSample, dashboardComputeKey]);
 
-  const dashboardContainer = useContainerWidth();
+  const [dashboardNode, setDashboardNode] = useState<HTMLDivElement | null>(null);
+  const [dashboardWidth, setDashboardWidth] = useState(0);
+  const dashboardContainer = { containerRef: setDashboardNode, width: dashboardWidth };
+  useEffect(() => {
+    if (!dashboardNode) return;
+    const measure = () => setDashboardWidth(dashboardNode.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(dashboardNode);
+    return () => observer.disconnect();
+  }, [dashboardNode]);
 
   useEffect(() => {
     if (!effectiveDashboardSpec) {
@@ -1189,45 +1262,9 @@ export default function App() {
     }
   }, [canManageDashboards, dashboardMode]);
 
-  const statsForTab =
-    tab === 'events'
-      ? computeFieldStats('events', events, Object.keys(activeFilters))
-      : tab === 'traces'
-        ? computeFieldStats('traces', traces, Object.keys(activeFilters))
-        : [];
-  const suggestedKeys = statsForTab.slice(0, 8).map((s) => s.key);
-  const filterKeys = Array.from(new Set([...suggestedKeys, ...Object.keys(activeFilters)]));
-  const statsByKey = new Map(statsForTab.map((s) => [s.key, s]));
-
-  const toggleInValue = (key: string, value: string) => {
-    setActiveFilters((prev) => {
-      const normalizedKey = normalizeFilterKey(tab, key);
-      const current = prev[normalizedKey] ?? { op: 'in' as const, values: [] as string[] };
-      const nextValues = current.values.includes(value)
-        ? current.values.filter((v) => v !== value)
-        : [...current.values, value];
-      const next: FilterState = { ...prev, [normalizedKey]: { op: 'in', values: nextValues } };
-      if (next[normalizedKey].values.length === 0) {
-        delete next[normalizedKey];
-      }
-      return next;
-    });
-  };
-
-  const addContainsToken = (key: string, token: string) => {
-    const cleaned = token.trim();
-    if (!cleaned) return;
-    setActiveFilters((prev) => {
-      const normalizedKey = normalizeFilterKey(tab, key);
-      const current = prev[normalizedKey] ?? { op: 'contains' as const, values: [] as string[] };
-      const values = current.values.includes(cleaned) ? current.values : [...current.values, cleaned];
-      return { ...prev, [normalizedKey]: { op: 'contains', values } };
-    });
-  };
-
   const clearFilterKey = (key: string) => {
     setActiveFilters((prev) => {
-      const normalizedKey = normalizeFilterKey(tab, key);
+      const normalizedKey = prev[key] ? key : normalizeFilterKey(tab, key);
       if (!prev[normalizedKey]) return prev;
       const next: FilterState = { ...prev };
       delete next[normalizedKey];
@@ -1352,11 +1389,15 @@ export default function App() {
   const uuid = (prefix = 'w') =>
     `${prefix}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 8)}`;
 
+  const dashboardDetailSeq = useRef(0);
   const loadDashboard = async (id: number) => {
     if (dropIdRef.current === null) return;
+    const requestDrop = dropIdRef.current;
+    const seq = ++dashboardDetailSeq.current;
     setDashboardLoading(true);
     try {
       const row = await fetchJson<DashboardRow>(`/api/dashboards/${id}?dropId=${dropIdRef.current}`);
+      if (requestDrop !== dropIdRef.current || seq !== dashboardDetailSeq.current) return;
       setDashboardSelectedId(row.id);
       setDashboardName(row.name);
       const spec = parseDashboardSpec(row.spec_json);
@@ -1373,10 +1414,14 @@ export default function App() {
   const refreshDashboardSample = async () => {
     if (dropIdRef.current === null) return;
     if (!dashboardSpec) return;
+    void refreshStats(true);
+    const requestDrop = dropIdRef.current;
+    const seq = dashboardDetailSeq.current;
     setDashboardLoading(true);
     try {
       const limit = Math.max(100, Math.min(20_000, Number(dashboardSpec.sampleSize ?? 2000)));
-      const data = await fetchJson<WideEvent[]>(`/api/events?dropId=${dropIdRef.current}&limit=${limit}`);
+      const data = await fetchJson<WideEvent[]>(`/api/dashboard-sample?dropId=${dropIdRef.current}&limit=${limit}`);
+      if (requestDrop !== dropIdRef.current || seq !== dashboardDetailSeq.current) return;
       setDashboardSample(data);
     } catch (error) {
       alert((error as Error).message);
@@ -1672,11 +1717,6 @@ export default function App() {
     );
   };
 
-  async function ensureDashboardDataLoaded() {
-    if (!dashboardSpec) return;
-    if (dashboardSample.length > 0) return;
-    await refreshDashboardSample();
-  }
 
   if (authEnabled === null) {
     return (
@@ -2032,7 +2072,7 @@ export default function App() {
 
 	      <main style={styles.main}>
 	        <div className="app-sticky-nav" style={styles.stickyNav}>
-	          <div style={styles.tabs}>
+	          <div className="app-tabs" style={styles.tabs}>
 		          <button
 		            style={{
 		              ...styles.tab,
@@ -2098,7 +2138,7 @@ export default function App() {
                   </button>
                 </>
               )}
-              <button style={styles.button} onClick={fetchDashboards} disabled={dropId === null}>
+              <button style={styles.button} onClick={() => { void fetchDashboards(); void refreshStats(true); }} disabled={dropId === null}>
                 Refresh List
               </button>
               <button style={styles.button} onClick={refreshDashboardSample} disabled={!dashboardSpec || dropId === null}>
@@ -2146,7 +2186,8 @@ export default function App() {
 		            <>
 		              <input
 		                type="text"
-                placeholder="Search..."
+                aria-label="Search telemetry"
+                placeholder="Search all telemetry in this drop…"
                 style={styles.searchInput}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -2166,7 +2207,7 @@ export default function App() {
               {Object.entries(activeFilters).map(([key, filter]) => (
                 <span key={key} style={styles.chip} title={`${key} ${filter.op} ${filter.values.join(', ')}`}>
                   <span style={{ ...styles.mono, color: '#e5e7eb' }}>{key}</span>
-                  <span style={{ color: '#777' }}>{filter.op === 'contains' ? '∋' : '='}</span>
+                  <span style={{ color: '#777' }}>{filter.op === 'contains' ? 'contains' : 'is'}</span>
                   <span>{truncate(filter.values.join(', '), 26)}</span>
                   <button
                     style={styles.chipButton}
@@ -2177,15 +2218,15 @@ export default function App() {
                   </button>
                 </span>
               ))}
-              <button style={styles.button} onClick={() => setPaused(!paused)}>
+              <button style={styles.button} onClick={() => { setPaused(!paused); if (paused) { void refreshStats(true); void fetchData(); } }}>
                 {paused ? 'Resume' : 'Pause'}
               </button>
               <button style={{ ...styles.button, ...styles.buttonDanger }} onClick={handleClear}>
                 Clear
               </button>
               <div style={styles.liveIndicator}>
-                {connected && !paused && <div style={styles.liveDot} />}
-                {connected ? (paused ? 'Paused' : 'Live') : 'Disconnected'}
+                {connected && !paused && streamViewRef.current && <div style={styles.liveDot} />}
+                {connected ? (paused ? 'Paused' : !streamViewRef.current ? 'Filtered view' : 'Live') : 'Disconnected'}
               </div>
             </>
 		          )}
@@ -2195,171 +2236,37 @@ export default function App() {
 	        {tab !== 'dashboards' && tab !== 'settings' && showFilters && (
 	          <div style={styles.filtersPanel}>
 	            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '12px', marginBottom: '12px' }}>
-	              <div style={{ color: '#fff', fontWeight: 700 }}>Smart Filters</div>
+	              <div style={{ color: '#fff', fontWeight: 700 }}>Filter telemetry</div>
               <div style={{ color: '#777', fontSize: '12px' }}>
-                Suggested fields update as logs stream in (high-cardinality fields use token search).
+                Matches all fields; matches any selected value within each field.
               </div>
             </div>
 
-            <div style={styles.filtersGrid}>
-              {filterKeys.map((key) => {
-                const stat = statsByKey.get(key);
-                const filter = activeFilters[key];
-                const isHigh = stat?.highCardinality ?? true;
+            <FilterBar tab={tab} filters={activeFilters} setFilters={setActiveFilters} fields={Array.from(new Set([...(tab === 'events' ? ['service_name', 'outcome', 'operation_type', 'field_name', 'user_id', 'trace_id', 'duration_ms'] : ['service_name', 'status', 'operation_name', 'trace_id', 'duration_ms']), ...Object.keys(activeFilters)]))} />
 
-                return (
-                  <div key={key} style={styles.filterCard}>
-                    <div style={styles.filterCardTitle}>
-                      <span style={{ ...styles.mono, color: '#e5e7eb' }}>{key}</span>
-                      <span style={styles.filterHint}>
-                        {stat
-                          ? isHigh
-                            ? `high-card (${stat.distinct})`
-                            : `${stat.distinct} values`
-                          : 'custom'}
-                      </span>
-                    </div>
-
-                    {isHigh ? (
-                      <>
-                        <input
-                          style={styles.filterInput}
-                          placeholder="Add token (press Enter)…"
-                          onKeyDown={(e) => {
-                            if (e.key !== 'Enter') return;
-                            const input = e.currentTarget;
-                            addContainsToken(key, input.value);
-                            input.value = '';
-                          }}
-                        />
-                        <div style={{ ...styles.filterValues, marginTop: '10px' }}>
-                          {(filter?.values ?? []).map((v) => (
-                            <span key={v} style={{ ...styles.chip, borderColor: '#6366f1' }}>
-                              {v}
-                              <button
-                                style={styles.chipButton}
-                                onClick={() => {
-                                  setActiveFilters((prev) => {
-                                    const cur = prev[key];
-                                    if (!cur) return prev;
-                                    const nextValues = cur.values.filter((x) => x !== v);
-                                    const next: FilterState = { ...prev, [key]: { op: 'contains', values: nextValues } };
-                                    if (next[key].values.length === 0) delete next[key];
-                                    return next;
-                                  });
-                                }}
-                              >
-                                ×
-                              </button>
-                            </span>
-                          ))}
-                          {stat?.valuesTop?.map(({ value }) => (
-                            <button
-                              key={value}
-                              style={{ ...styles.chip, cursor: 'pointer', background: '#141414' }}
-                              onClick={() => addContainsToken(key, value)}
-                              title="Add token"
-                            >
-                              {value}
-                            </button>
-                          ))}
-                          {filter?.values?.length ? (
-                            <button style={styles.button} onClick={() => clearFilterKey(key)}>
-                              Clear
-                            </button>
-                          ) : null}
-                        </div>
-                      </>
-                    ) : (
-                      <div style={styles.filterValues}>
-                        {(stat?.valuesTop ?? []).map(({ value, count }) => {
-                          const selected = filter?.op === 'in' && filter.values.includes(value);
-                          return (
-                            <button
-                              key={value}
-                              style={{
-                                ...styles.chip,
-                                cursor: 'pointer',
-                                borderColor: selected ? '#6366f1' : '#333',
-                                background: selected ? '#1b1b3a' : '#0f0f0f',
-                                color: selected ? '#fff' : '#ddd',
-                              }}
-                              onClick={() => toggleInValue(key, value)}
-                              title={`${count} occurrences`}
-                            >
-                              {value}
-                              <span style={{ color: selected ? '#c7d2fe' : '#777' }}>({count})</span>
-                            </button>
-                          );
-                        })}
-                        {filter?.values?.length ? (
-                          <button style={styles.button} onClick={() => clearFilterKey(key)}>
-                            Clear
-                          </button>
-                        ) : null}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
           </div>
         )}
 
         <div style={styles.content}>
+          {listLoading && <div role="status" style={{ padding: 12, color: '#aaa' }}>Loading telemetry…</div>}
+          {statsError && <div role="alert" style={{ padding: 12, color: '#fca5a5' }}>Totals may be out of date: {statsError} <button style={styles.button} onClick={() => void refreshStats(true)}>Retry totals</button></div>}
+          {listError && <div role="alert" style={{ padding: 12, color: '#fca5a5' }}>{listError} <button style={styles.button} onClick={handleSearch}>Retry</button></div>}
           {tab === 'dashboards' ? (
-            <div style={{ display: 'flex', gap: '16px', alignItems: 'stretch' }}>
-              <div style={{ ...styles.pane, flex: '0 0 340px' }}>
-                <div style={styles.paneHeader}>
-                  <span style={styles.paneTitle}>Dashboards</span>
-                  <button style={styles.copyButton} onClick={fetchDashboards}>
-                    Refresh
-                  </button>
-                </div>
-                <div style={styles.paneBody}>
-                  {dashboards.length === 0 ? (
-                    <div style={styles.tiny}>
-                      No dashboards yet. Create one or generate from the last N wide events.
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {dashboards.map((d) => (
-                        <button
-                          key={d.id}
-                          style={{
-                            ...styles.button,
-                            textAlign: 'left' as const,
-                            background: d.id === dashboardSelectedId ? '#1b1b3a' : '#222',
-                            border: d.id === dashboardSelectedId ? '1px solid #6366f1' : '1px solid #333',
-                          }}
-                          onClick={() => loadDashboard(d.id)}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
-                            <span>{d.name}</span>
-                            <span style={{ color: '#777', fontSize: '12px' }}>#{d.id}</span>
-                          </div>
-                          <div style={{ color: '#777', fontSize: '11px', marginTop: '4px' }}>
-                            Updated: {new Date(d.updated_at).toLocaleString()}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #222' }}>
-                    <div style={styles.tiny}>
-                      Builder edits a JSON dashboard spec. Save stores it per Drop.
-                    </div>
-                  </div>
-                </div>
-              </div>
+            <div className="dashboard-page" style={{ display: 'grid', gap: '16px' }}>
+              <label style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <span>Dashboard</span>
+                <select aria-label="Dashboard" style={{ ...styles.select, minWidth: 240 }} value={dashboardSelectedId ?? ''} onChange={e => void loadDashboard(Number(e.target.value))}>
+                  <option value="" disabled>{dashboards.length ? 'Choose a dashboard' : 'No dashboards yet'}</option>
+                  {dashboards.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+              </label>
 
               <div
                 style={{
                   ...styles.pane,
                   flex: 1,
                   ...(dashboardMode === 'view'
-                    ? { borderColor: '#14532d', background: '#0b1410' }
+                    ? { borderColor: '#333', background: '#111' }
                     : { borderColor: '#333' }),
                 }}
               >
@@ -2724,8 +2631,8 @@ export default function App() {
                           </div>
                         )}
 
-                        <div style={{ ...styles.pane, overflow: 'hidden' }}>
-                          <div style={styles.paneHeader}>
+                        <div style={{ ...styles.pane, overflow: 'hidden', ...(dashboardMode === 'view' ? { border: 'none', background: 'transparent' } : {}) }}>
+                          <div style={{ ...styles.paneHeader, ...(dashboardMode === 'view' ? { display: 'none' } : {}) }}>
                             <span style={styles.paneTitle}>
                               {dashboardMode === 'edit' ? 'Preview' : 'Dashboard'}
                             </span>
@@ -2733,22 +2640,24 @@ export default function App() {
                               last {effectiveDashboardSpec.sampleSize} (loaded {dashboardSample.length})
                             </span>
                           </div>
-                          <div style={{ ...styles.paneBody, maxHeight: '70vh' }}>
+                          <div style={styles.paneBody}>
                             {dashboardSample.length === 0 ? (
-                              <div style={styles.empty}>No sample loaded. Click “Refresh Data” in the toolbar.</div>
+                              <div style={styles.empty}>{dashboardLoading ? 'Loading dashboard…' : 'No events in this drop yet.'}</div>
                             ) : (
                               <div ref={dashboardContainer.containerRef} style={{ width: '100%' }}>
                                 <GridLayout
                                   width={dashboardContainer.width}
                                   layout={
-                                    effectiveDashboardSpec.widgets.map((w) => {
+                                    effectiveDashboardSpec.widgets.map((w, index) => {
                                       const defaults = defaultWidgetLayout(w);
                                       const l: any = w.layout ?? {};
                                       const ww = clampInt(l.w, 1, DASHBOARD_COLS, defaults.w);
                                       const hh = clampInt(l.h, 1, 50, defaults.h);
                                       const xx = clampInt(l.x, 0, Math.max(0, DASHBOARD_COLS - ww), 0);
                                       const yy = clampInt(l.y, 0, 100_000, 0);
-                                      return { i: w.id, x: xx, y: yy, w: ww, h: hh };
+                                      return dashboardContainer.width < 600 && dashboardMode === 'view'
+                                        ? { i: w.id, x: 0, y: index * 50, w: DASHBOARD_COLS, h: hh }
+                                        : { i: w.id, x: xx, y: yy, w: ww, h: hh };
                                     }) as unknown as Layout
                                   }
                                   gridConfig={{
@@ -2863,8 +2772,8 @@ export default function App() {
               </div>
             </div>
           ) : tab === 'settings' ? (
-            <div style={{ display: 'grid', gap: '16px', alignItems: 'start' }}>
-              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <div className="settings-page" style={{ display: 'grid', gap: '20px', alignItems: 'start', maxWidth: 1200, margin: '0 auto' }}>
+              <nav aria-label="Settings sections" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', borderBottom: '1px solid #333', paddingBottom: 12 }}>
                 {(
                   [
                     { id: 'account', label: 'Account', show: true },
@@ -2881,10 +2790,11 @@ export default function App() {
                     return (
                       <button
                         key={t.id}
+                        aria-current={active ? 'page' : undefined}
                         onClick={() => setSettingsTab(t.id)}
                         style={{
                           padding: '8px 12px',
-                          borderRadius: '999px',
+                          borderRadius: '6px',
                           border: `1px solid ${active ? 'rgba(99,102,241,0.55)' : '#222'}`,
                           background: active ? 'rgba(99,102,241,0.16)' : '#0f0f0f',
                           color: active ? '#fff' : '#cbd5e1',
@@ -2897,7 +2807,8 @@ export default function App() {
                       </button>
                     );
                   })}
-              </div>
+              </nav>
+              {settingsLoading && <div role="status">Loading settings…</div>}
 
               {settingsTab === 'account' && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
@@ -2924,8 +2835,8 @@ export default function App() {
                         </div>
                       )}
 
-                      <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
-                        <div style={{ ...styles.metaLabel, marginBottom: '8px' }}>Auth summary</div>
+                      <details style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #222' }}>
+                        <summary style={{ cursor: 'pointer', marginBottom: 12 }}>Authentication details</summary>
                         <div style={{ display: 'grid', gap: '8px' }}>
                           <div style={styles.pill}>
                             Mode:
@@ -2958,32 +2869,11 @@ export default function App() {
                             </span>
                           </div>
                         </div>
-                      </div>
+                      </details>
                     </div>
                   </div>
 
-                  <div style={styles.pane}>
-                    <div style={styles.paneHeader}>
-                      <span style={styles.paneTitle}>Dependency Map</span>
-                      <span style={styles.tiny}>What depends on what</span>
-                    </div>
-                    <div style={styles.paneBody}>
-                      <div style={{ color: '#bbb', fontSize: '13px', lineHeight: 1.7 }}>
-                        <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                          <li>
-                            <span style={styles.mono}>RAPHAEL_AUTH_ENABLED=true</span> requires login for the UI and enforces drop permissions for queries and ingestion.
-                          </li>
-                          <li>Providers are enabled only when their env vars are configured (buttons appear automatically).</li>
-                          <li>
-                            OAuth allowlist is enforced only in <span style={styles.mono}>oauth_only</span> mode (email/password disabled).
-                          </li>
-                          <li>
-                            Service accounts and API keys are <b>mine-only</b>. Keys can only be minted with permissions you already have.
-                          </li>
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
+
                 </div>
               )}
 
@@ -3470,7 +3360,7 @@ export default function App() {
                                                 style={{
                                                   ...styles.mono,
                                                   padding: '2px 6px',
-                                                  borderRadius: '999px',
+                                                  borderRadius: '6px',
                                                   border: '1px solid rgba(34,197,94,0.35)',
                                                   background: p.can_ingest ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.04)',
                                                   color: p.can_ingest ? '#bbf7d0' : 'rgba(255,255,255,0.45)',
@@ -3482,7 +3372,7 @@ export default function App() {
                                                 style={{
                                                   ...styles.mono,
                                                   padding: '2px 6px',
-                                                  borderRadius: '999px',
+                                                  borderRadius: '6px',
                                                   border: '1px solid rgba(99,102,241,0.35)',
                                                   background: p.can_query ? 'rgba(99,102,241,0.12)' : 'rgba(255,255,255,0.04)',
                                                   color: p.can_query ? '#c7d2fe' : 'rgba(255,255,255,0.45)',
@@ -4012,6 +3902,8 @@ export default function App() {
                 </button>
               </div>
             </div>
+          ) : listLoading && events.length === 0 && traces.length === 0 ? null : (search.trim() || Object.keys(activeFilters).length > 0) && (tab === 'events' ? events.length === 0 : traces.length === 0) ? (
+            <div style={styles.empty}>No matches. Adjust your filters or search.</div>
           ) : tab === 'events' ? (
             <EventsTable
               allEvents={events}
@@ -4030,8 +3922,7 @@ export default function App() {
               <button
                 style={styles.button}
                 onClick={fetchMoreListRows}
-                disabled={listLoading || (tab === 'events' ? !eventNextCursor : !traceNextCursor) || Boolean(search.trim())}
-                title={search.trim() ? 'Clear search to page through the latest rows' : undefined}
+                disabled={listLoading || (tab === 'events' ? !eventNextCursor : !traceNextCursor)}
               >
                 {listLoading
                   ? 'Loading...'
@@ -4043,7 +3934,7 @@ export default function App() {
                       ? 'Load older traces'
                       : 'No more loaded pages'}
               </button>
-              <button style={styles.button} onClick={fetchData} disabled={listLoading}>
+              <button style={styles.button} onClick={handleSearch} disabled={listLoading}>
                 Refresh latest {LIST_PAGE_SIZE}
               </button>
             </div>

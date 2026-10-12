@@ -24,13 +24,16 @@ function safeJsonParse(value: string | null | undefined): Record<string, unknown
   }
 }
 
+const parsedAttributes = new WeakMap<WideEvent, Record<string, unknown>>();
+
 function getFieldValue(event: WideEvent, field: string): unknown {
   if (field === 'operation') {
     return `${event.operation_type ?? ''}:${event.field_name ?? ''}`.replace(/^:/, '').replace(/:$/, '');
   }
   const direct = (event as any)[field];
   if (direct !== undefined) return direct;
-  const attrs = safeJsonParse(event.attributes);
+  let attrs = parsedAttributes.get(event);
+  if (!attrs) { attrs = safeJsonParse(event.attributes); parsedAttributes.set(event, attrs); }
   if (Object.prototype.hasOwnProperty.call(attrs, field)) return (attrs as any)[field];
   return undefined;
 }

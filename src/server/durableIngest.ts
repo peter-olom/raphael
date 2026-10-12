@@ -111,6 +111,9 @@ function launchWorker() {
       oldest = message.oldest;
       storageState = message.state;
     } else if (message.type === 'broadcast') {
+      for (const delta of message.counts || []) {
+        if (hasSubscribers(delta.drop_id)) broadcast({ type: 'stats_delta', ...delta, commitCursor: message.commitCursor }, delta.drop_id);
+      }
       const requestedBatch = Number(process.env.RAPHAEL_INGEST_BROADCAST_BATCH_SIZE || 200);
       const batchSize = Number.isSafeInteger(requestedBatch) && requestedBatch > 0 ? Math.min(5000, requestedBatch) : 200;
       for (const kind of ['traces', 'wide_events']) {
@@ -122,7 +125,7 @@ function launchWorker() {
         }
         for (const [dropId, records] of groups) {
           for (let offset = 0; offset < records.length; offset += batchSize) {
-            broadcast({ type: kind, drop_id: dropId, data: records.slice(offset, offset + batchSize) }, dropId);
+            broadcast({ type: kind, drop_id: dropId, commitCursor: message.commitCursor, data: records.slice(offset, offset + batchSize) }, dropId);
           }
         }
       }

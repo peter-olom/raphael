@@ -1,4 +1,5 @@
 import { requestMaintenance } from '../retention.js';
+import { queryTelemetry } from '../db/telemetry.js';
 import { Router, Request, Response } from 'express';
 import {
   DEFAULT_DROP_ID,
@@ -81,8 +82,14 @@ apiRouter.get('/traces', (req: Request, res: Response) => {
   const limit = parseLimit(req.query.limit);
   const offset = parseOffset(req.query.offset);
   const beforeId = parsePositiveCursor(req.query.beforeId ?? req.query.cursor);
-  const traces = getRecentTraces(dropId, limit, offset, beforeId);
-  res.json(listPayload(req, traces as Array<{ id?: number }>, limit));
+  try {
+    const traces = req.query.filters || req.query.q
+      ? queryTelemetry(dropId, 'traces', limit, beforeId, String(req.query.q ?? ''), JSON.parse(String(req.query.filters ?? '{}')))
+      : getRecentTraces(dropId, limit, offset, beforeId);
+    res.json(listPayload(req, traces as Array<{ id?: number }>, limit));
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 // Get recent wide events
@@ -94,8 +101,14 @@ apiRouter.get('/events', (req: Request, res: Response) => {
   const limit = parseLimit(req.query.limit);
   const offset = parseOffset(req.query.offset);
   const beforeId = parsePositiveCursor(req.query.beforeId ?? req.query.cursor);
-  const events = getRecentWideEvents(dropId, limit, offset, beforeId);
-  res.json(listPayload(req, events as Array<{ id?: number }>, limit));
+  try {
+    const events = req.query.filters || req.query.q
+      ? queryTelemetry(dropId, 'events', limit, beforeId, String(req.query.q ?? ''), JSON.parse(String(req.query.filters ?? '{}')))
+      : getRecentWideEvents(dropId, limit, offset, beforeId);
+    res.json(listPayload(req, events as Array<{ id?: number }>, limit));
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 apiRouter.get('/events/:eventId', (req: Request, res: Response) => {
@@ -292,6 +305,14 @@ apiRouter.delete('/drops/:dropId', (req: Request, res: Response) => {
   }
 });
 
+apiRouter.get('/dashboard-sample', (req: Request, res: Response) => {
+  if (!requireAuth(req, res)) return;
+  const dropId = getDropId(req, res);
+  if (dropId === null || !requireDropAccess(req, res, dropId, 'query')) return;
+  const limit = Math.max(100, Math.min(20000, Number(req.query.limit) || 2000));
+  res.json(getRecentWideEvents(dropId, limit, 0, null, 20000, true));
+});
+
 // Dashboards
 apiRouter.get('/dashboards', (req: Request, res: Response) => {
   if (!requireAuth(req, res)) return;
@@ -371,7 +392,7 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
   const useAi = Boolean(req.body?.use_ai ?? false);
 
   // Sample: last N events (by created_at)
-  const sample = getRecentWideEvents(dropId, limit, 0, 20_000) as any[];
+  const sample = getRecentWideEvents(dropId, limit, 0, null, 20_000, true) as any[];
   const profiles = profileWideEvents(sample);
 
   try {

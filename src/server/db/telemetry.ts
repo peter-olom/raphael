@@ -189,12 +189,12 @@ export function getRecentTraces(dropId: number, limit = 100, offset = 0, beforeI
   `).all(dropId, lim, off);
 }
 
-export function getRecentWideEvents(dropId: number, limit = 100, offset = 0, beforeId?: number | null, maxLimit = 2000) {
+export function getRecentWideEvents(dropId: number, limit = 100, offset = 0, beforeId?: number | null, maxLimit = 2000, includeAttributes = false) {
   const lim = clampLimit(limit, maxLimit);
   const off = beforeId ? 0 : clampOffset(offset);
   if (beforeId && Number.isFinite(beforeId) && beforeId > 0) {
     return db.prepare(`
-      SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at
+      SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at${includeAttributes ? ", attributes" : ""}
       FROM wide_events
       WHERE drop_id = ? AND id < ?
       ORDER BY id DESC
@@ -202,7 +202,7 @@ export function getRecentWideEvents(dropId: number, limit = 100, offset = 0, bef
     `).all(dropId, Math.floor(beforeId), lim);
   }
   return db.prepare(`
-    SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at
+    SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at${includeAttributes ? ", attributes" : ""}
     FROM wide_events
     WHERE drop_id = ?
     ORDER BY id DESC
@@ -264,7 +264,7 @@ export function searchWideEvents(dropId: number, query: string, limit = 100) {
   const lim = clampLimit(limit);
   const includeAttributes = isTruthy(process.env.RAPHAEL_SEARCH_ATTRIBUTES_ENABLED);
   return db.prepare(`
-    SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at
+    SELECT id, drop_id, trace_id, service_name, operation_type, field_name, outcome, duration_ms, user_id, error_count, rpc_call_count, created_at${includeAttributes ? ", attributes" : ""}
     FROM wide_events
     WHERE drop_id = ?
       AND (
@@ -280,21 +280,25 @@ export function searchWideEvents(dropId: number, query: string, limit = 100) {
 }
 
 export function getStats(dropId: number) {
-  const traceCount = db
-    .prepare('SELECT COUNT(*) as count FROM traces WHERE drop_id = ?')
-    .get(dropId) as { count: number };
-  const eventCount = db
-    .prepare('SELECT COUNT(*) as count FROM wide_events WHERE drop_id = ?')
-    .get(dropId) as { count: number };
-  const errorCount = db
-    .prepare('SELECT COUNT(*) as count FROM wide_events WHERE drop_id = ? AND outcome = ?')
-    .get(dropId, 'error') as { count: number };
+  // Counts and the commit cursor must describe the same SQLite snapshot.
+  return db.transaction(() => {
+    const traceCount = db
+      .prepare('SELECT COUNT(*) as count FROM traces WHERE drop_id = ?')
+      .get(dropId) as { count: number };
+    const eventCount = db
+      .prepare('SELECT COUNT(*) as count FROM wide_events WHERE drop_id = ?')
+      .get(dropId) as { count: number };
+    const errorCount = db
+      .prepare('SELECT COUNT(*) as count FROM wide_events WHERE drop_id = ? AND outcome = ?')
+      .get(dropId, 'error') as { count: number };
 
-  return {
-    traces: traceCount.count,
-    wideEvents: eventCount.count,
-    errors: errorCount.count,
-  };
+    return {
+      traces: traceCount.count,
+      wideEvents: eventCount.count,
+      errors: errorCount.count,
+      commitCursor: db.prepare('SELECT stored_traces + stored_events AS cursor FROM telemetry_storage_state WHERE id = 1').get().cursor,
+    };
+  }).deferred();
 }
 
 export function clearAll(dropId?: number) {
@@ -424,4 +428,40 @@ export function dedupeTraceSpans(options: { id_window_size?: unknown; max_runtim
     timed_out: Date.now() >= deadline && cursorId < maxTraceId,
     busy,
   } satisfies TraceSpanDedupResult;
+}
+
+// Filter before pagination so matches are found throughout the drop.
+export function queryTelemetry(dropId: number, kind: 'events' | 'traces', limit: number, beforeId: number | null, search: string, rawFilters: unknown) {
+  const columns = kind === 'events'
+    ? ['id', 'drop_id', 'trace_id', 'service_name', 'operation_type', 'field_name', 'outcome', 'duration_ms', 'user_id', 'error_count', 'rpc_call_count', 'created_at']
+    : ['id', 'drop_id', 'trace_id', 'span_id', 'parent_span_id', 'service_name', 'operation_name', 'start_time', 'end_time', 'duration_ms', 'status', 'created_at'];
+  const clauses = ['drop_id = ?'];
+  const params: Array<string | number> = [dropId];
+  if (beforeId) { clauses.push('id < ?'); params.push(beforeId); }
+  if (search.trim()) {
+    const searchColumns = isTruthy(process.env.RAPHAEL_SEARCH_ATTRIBUTES_ENABLED) ? [...columns, 'attributes'] : columns;
+    clauses.push(`instr(lower(${searchColumns.map(c => `coalesce(CAST(${c} AS TEXT), '')`).join(" || ' ' || ")}), lower(?)) > 0`);
+    params.push(search.trim());
+  }
+  if (!rawFilters || typeof rawFilters !== 'object' || Array.isArray(rawFilters)) throw new Error('Invalid filters');
+  const entries = Object.entries(rawFilters);
+  if (entries.length > 20) throw new Error('Too many filters');
+  for (const [rawKey, filter] of entries) {
+    const aliases: Record<string, string> = { 'service.name': 'service_name', 'graphql.operation_type': 'operation_type', 'graphql.field_name': 'field_name', 'duration.total_ms': 'duration_ms', 'user.id': 'user_id' };
+    const key = kind === 'events' ? aliases[rawKey] ?? rawKey : rawKey;
+    if (!filter || !['in', 'contains'].includes(filter.op) || !Array.isArray(filter.values) || filter.values.length > 30 || !filter.values.every((v: unknown) => typeof v === 'string' && v.length <= 500)) throw new Error('Invalid filter');
+    if (!filter.values.length) continue;
+    if (!/^[a-zA-Z0-9_.-]{1,120}$/.test(key)) throw new Error('Invalid filter field');
+    const expression = columns.includes(key) ? key : `CAST(CASE coalesce(json_type(CASE WHEN json_valid(attributes) THEN attributes ELSE '{}' END, ?), json_type(CASE WHEN json_valid(attributes) THEN attributes ELSE '{}' END, ?)) WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' ELSE coalesce(json_extract(CASE WHEN json_valid(attributes) THEN attributes ELSE '{}' END, ?), json_extract(CASE WHEN json_valid(attributes) THEN attributes ELSE '{}' END, ?)) END AS TEXT)`;
+    const terms = filter.values.map((value: string) => {
+      if (!columns.includes(key)) {
+        const paths = [`$."${key}"`, '$.' + key.split('.').map(part => `"${part}"`).join('.')];
+        params.push(...paths, ...paths);
+      }
+      params.push(value);
+      return filter.op === 'in' ? `${expression} = ?` : `instr(lower(${expression}), lower(?)) > 0`;
+    });
+    clauses.push('(' + terms.join(' OR ') + ')');
+  }
+  return db.prepare(`SELECT ${columns.join(', ')} FROM ${kind === 'events' ? 'wide_events' : 'traces'} WHERE ${clauses.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...params, limit);
 }

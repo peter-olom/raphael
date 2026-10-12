@@ -34,6 +34,7 @@ export interface Stats {
   traces: number;
   wideEvents: number;
   errors: number;
+  commitCursor?: number;
 }
 
 export interface Drop {
