@@ -170,7 +170,7 @@ export function resolveDropId(nameOrId?: string | null, allowCreate = true): num
     const dropId = Number.parseInt(raw, 10);
     const existing = getDropById(dropId)?.id;
     if (existing) return existing;
-    return allowCreate ? DEFAULT_DROP_ID : null;
+    return null;
   }
 
   const existing = getDropByName(raw);
@@ -213,8 +213,8 @@ const deleteOldTracesBatch = db.prepare(`
   WHERE rowid IN (
     SELECT rowid
     FROM traces
-    WHERE drop_id = ? AND created_at < ?
-    ORDER BY created_at ASC
+    WHERE drop_id = ? AND COALESCE(telemetry_time, created_at) < ?
+    ORDER BY COALESCE(telemetry_time, created_at) ASC
     LIMIT ?
   )
 `);
@@ -224,8 +224,8 @@ const deleteOldEventsBatch = db.prepare(`
   WHERE rowid IN (
     SELECT rowid
     FROM wide_events
-    WHERE drop_id = ? AND created_at < ?
-    ORDER BY created_at ASC
+    WHERE drop_id = ? AND COALESCE(telemetry_time, created_at) < ?
+    ORDER BY COALESCE(telemetry_time, created_at) ASC
     LIMIT ?
   )
 `);

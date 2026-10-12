@@ -1,3 +1,4 @@
+import { beginDatabaseOperation } from './maintenanceGate.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
 import { DEFAULT_DROP_ID, getUserDropPermission, resolveDropId } from './db/sqlite.js';
@@ -32,6 +33,9 @@ export function setupWebSocket(server: Server) {
   });
 
   wss.on('connection', async (ws, req) => {
+    const release = beginDatabaseOperation();
+    if (!release) { ws.close(1013, 'Database maintenance; retry shortly'); return; }
+    try {
     if (authEnabled()) {
       try {
         const session = await getAuth().api.getSession({ headers: fromNodeHeaders(req.headers) });
@@ -72,6 +76,9 @@ export function setupWebSocket(server: Server) {
       try {
         const msg = JSON.parse(raw.toString());
         if (msg?.type === 'subscribe') {
+          const releaseSubscribe = beginDatabaseOperation();
+          if (!releaseSubscribe) { ws.send(JSON.stringify({ type: 'error', error: 'Database maintenance; retry shortly', retryable: true })); return; }
+          try {
           const ctx = contexts.get(ws) ?? { userId: null, role: null };
           const allowCreate = !authEnabled() || ctx.role === 'admin';
           const dropId = resolveDropId(msg.dropId?.toString?.() ?? msg.drop?.toString?.(), allowCreate);
@@ -93,6 +100,7 @@ export function setupWebSocket(server: Server) {
           }
           subscriptions.set(ws, dropId);
           ws.send(JSON.stringify({ type: 'subscribed', drop_id: dropId }));
+          } finally { releaseSubscribe(); }
         }
       } catch {
         // Ignore invalid messages
@@ -101,6 +109,7 @@ export function setupWebSocket(server: Server) {
 
     // Send welcome message
     ws.send(JSON.stringify({ type: 'connected', message: 'Connected to Raphael' }));
+    } finally { release(); }
   });
 
   return wss;

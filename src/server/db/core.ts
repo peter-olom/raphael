@@ -1,3 +1,4 @@
+import { acquireDatabaseOwner } from '../databaseOwner.js';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -42,8 +43,8 @@ export function applySqlitePragmas(db: any) {
   const sync = parseSqliteSynchronous(process.env.RAPHAEL_SQLITE_SYNCHRONOUS);
   db.pragma(`synchronous = ${sync}`);
 
-  const busyTimeoutMs = parsePositiveInt(process.env.RAPHAEL_SQLITE_BUSY_TIMEOUT_MS, 5000);
-  db.pragma(`busy_timeout = ${busyTimeoutMs}`);
+  const busyTimeoutMs = parsePositiveInt(process.env.RAPHAEL_SQLITE_BUSY_TIMEOUT_MS, 50);
+  db.pragma(`busy_timeout = ${Math.min(busyTimeoutMs, 100)}`);
 
   const walAutocheckpointPages = parsePositiveInt(process.env.RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES, 1000);
   db.pragma(`wal_autocheckpoint = ${walAutocheckpointPages}`);
@@ -54,6 +55,7 @@ if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
+acquireDatabaseOwner();
 export const db: any = new Database(DB_PATH);
 applySqlitePragmas(db);
 db.pragma('auto_vacuum = INCREMENTAL');
@@ -387,6 +389,38 @@ try {
   db.exec(`PRAGMA foreign_keys = ON;`);
   console.warn('api_keys migration failed:', error);
 }
+
+// Older rows retain their original arrival-time retention semantics.
+runMigration('telemetry-source-time-2026-10-12', () => {
+  for (const table of ['traces', 'wide_events']) {
+    if (!columnExists(table, 'telemetry_time')) db.exec(`ALTER TABLE ${table} ADD COLUMN telemetry_time INTEGER;`);
+  }
+});
+db.exec(`
+  CREATE TABLE IF NOT EXISTS ingest_receipts (
+    id TEXT PRIMARY KEY,
+    filename TEXT NOT NULL,
+    committed_at INTEGER NOT NULL,
+    payload_bytes INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS telemetry_storage_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    stored_traces INTEGER NOT NULL DEFAULT 0,
+    stored_events INTEGER NOT NULL DEFAULT 0,
+    expired_traces INTEGER NOT NULL DEFAULT 0,
+    expired_events INTEGER NOT NULL DEFAULT 0,
+    missing_drop_records INTEGER NOT NULL DEFAULT 0,
+    last_commit_at INTEGER
+  );
+  INSERT OR IGNORE INTO telemetry_storage_state (id) VALUES (1);
+  CREATE INDEX IF NOT EXISTS idx_traces_retention_time ON traces(drop_id, COALESCE(telemetry_time, created_at));
+  CREATE INDEX IF NOT EXISTS idx_events_retention_time ON wide_events(drop_id, COALESCE(telemetry_time, created_at));
+`);
+
+for (const field of ['last_commit_lag_ms', 'last_commit_duration_ms', 'max_commit_duration_ms']) {
+  if (!columnExists('telemetry_storage_state', field)) db.exec(`ALTER TABLE telemetry_storage_state ADD COLUMN ${field} INTEGER NOT NULL DEFAULT 0`);
+}
+if (!columnExists('ingest_receipts', 'payload_bytes')) db.exec('ALTER TABLE ingest_receipts ADD COLUMN payload_bytes INTEGER NOT NULL DEFAULT 0');
 
 // Indexes that depend on drop_id (must run after migrations)
 db.exec(`

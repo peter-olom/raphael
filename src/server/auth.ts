@@ -1,4 +1,7 @@
+import { holdIngestRequest, releaseAbandonedIngest } from './ingestAdmission.js';
 import Database from 'better-sqlite3';
+import { beginDatabaseOperation, isIngestRequest, maintenanceActive, retryMaintenance } from './maintenanceGate.js';
+import { rememberSession, snapshotAuth, snapshotPermission } from './maintenanceSnapshot.js';
 import type { Request, Response, NextFunction } from 'express';
 import { createHash } from 'crypto';
 import { betterAuth } from 'better-auth';
@@ -449,6 +452,12 @@ export async function ensureAdminSeed() {
 }
 
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  if (maintenanceActive() && authEnabled()) {
+    const context = snapshotAuth(req, extractApiKey(req) ?? null);
+    if (!context) return retryMaintenance(res, 'Authentication unavailable during maintenance; retry shortly');
+    req.auth = context;
+    return next();
+  }
   if (!authEnabled()) {
     req.auth = { isAuthenticated: false, authType: 'none' };
     return next();
@@ -459,6 +468,9 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     return next();
   }
 
+  const releaseIngress = holdIngestRequest(req);
+  const releaseAuth = beginDatabaseOperation(true);
+  if (!releaseAuth) { releaseIngress(); return retryMaintenance(res); }
   try {
     const session = await getAuth().api.getSession({ headers: fromNodeHeaders(req.headers) });
     if (session?.user) {
@@ -487,11 +499,12 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
           disabled: false,
         },
       };
+      rememberSession(req, req.auth, session.session?.expiresAt, session.session?.id, session.session?.token);
       return next();
     }
   } catch (error) {
     console.warn('Failed to resolve session:', error);
-  }
+  } finally { releaseAuth(); releaseIngress(); releaseAbandonedIngest(req, res); }
 
   const apiKey = extractApiKey(req);
   if (apiKey) {
@@ -508,7 +521,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
 
       res.on('finish', () => {
         const ctx = req.auth;
-        if (!ctx?.apiKey) return;
+        if (!ctx?.apiKey || isIngestRequest(req)) return;
         try {
           logApiKeyUsage({
             api_key_id: ctx.apiKey.id,
@@ -566,7 +579,7 @@ export function requireDropAccess(req: Request, res: Response, dropId: number, a
   }
   if (req.auth?.user) {
     if (req.auth.user.role === 'admin') return true;
-    const permission = getUserDropPermission(req.auth.user.id, dropId);
+    const permission = maintenanceActive() ? snapshotPermission(req.auth.user.id, dropId) : getUserDropPermission(req.auth.user.id, dropId);
     const allowed = action === 'ingest' ? permission?.can_ingest : permission?.can_query;
     if (allowed) return true;
     res.status(403).json({ error: `User does not have ${action} permissions for this drop` });

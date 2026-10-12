@@ -9,7 +9,10 @@ import { eventsRouter } from './routes/events.js';
 import { apiRouter } from './routes/api.js';
 import { queryRouter } from './routes/query.js';
 import { setupWebSocket } from './websocket.js';
-import { startRetentionScheduler } from './retention.js';
+import { startRetentionScheduler, stopRetentionScheduler, getRetentionSchedulerStatus } from './retention.js';
+import { startDurableIngest, stopDurableIngest } from './durableIngest.js';
+import { databaseRequestGate, beginDatabaseOperation, retryMaintenance } from './maintenanceGate.js';
+import { ingestAdmission } from './ingestAdmission.js';
 import {
   authEnabled,
   authMiddleware,
@@ -79,6 +82,14 @@ app.use(
   })
 );
 
+// Health never opens SQLite or resolves credentials.
+app.get('/health', (_req, res) => {
+  const state = getRetentionSchedulerStatus();
+  res.json({ status: 'ok', maintenance: { running: state.running, phase: state.phase }, ingestion: { ready: state.ingestion.ready, queue_depth: state.ingestion.queue_depth } });
+});
+app.use(ingestAdmission);
+app.use(databaseRequestGate);
+
 // Auth config (non-BetterAuth endpoint)
 app.get('/api/auth/config', (_req, res) => {
   res.json(getAuthConfigSummary());
@@ -88,7 +99,12 @@ validateAuthBootstrapConfig();
 
 // BetterAuth handler (must come before express.json)
 if (authEnabled()) {
-  app.all('/api/auth/*', toNodeHandler(getAuthNodeHandler()));
+  const handler = toNodeHandler(getAuthNodeHandler());
+  app.all('/api/auth/*', async (req, res, next) => {
+    const release = beginDatabaseOperation(true);
+    if (!release) return retryMaintenance(res);
+    try { await handler(req, res); } catch (error) { next(error); } finally { release(); }
+  });
 }
 
 app.use(express.json({ limit: '10mb' }));
@@ -134,9 +150,12 @@ app.use((error: unknown, _req: express.Request, res: express.Response, next: exp
     res.status(400).json({ error: 'Invalid JSON body' });
     return;
   }
+  if (['SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_FULL', 'SQLITE_IOERR'].some((code) => String((error as any)?.code || '').startsWith(code))) return retryMaintenance(res, 'Database temporarily unavailable; retry shortly');
   console.error('Unhandled request error:', error);
   res.status(status >= 400 && status < 600 ? status : 500).json({ error: 'Internal server error' });
 });
+
+await startDurableIngest();
 
 // Setup WebSocket
 setupWebSocket(server);
@@ -160,3 +179,11 @@ server.listen(PORT, () => {
   ╰─────────────────────────────────────────╯
   `);
 });
+
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(signal, () => {
+    stopRetentionScheduler();
+    server.close();
+    void stopDurableIngest().finally(() => process.exit(0));
+  });
+}

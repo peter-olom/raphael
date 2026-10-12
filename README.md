@@ -189,7 +189,7 @@ curl -X POST http://localhost:6274/v1/events \
 | `BETTER_AUTH_BASE_URL`                    | `""`                | Base URL for OAuth callbacks and redirects (recommended)     |
 | `BETTER_AUTH_URL`                         | `""`                | Legacy base URL env var (fallback)                           |
 | `RAPHAEL_SQLITE_SYNCHRONOUS`              | `NORMAL`            | SQLite durability vs throughput (`FULL`, `NORMAL`, `OFF`)    |
-| `RAPHAEL_SQLITE_BUSY_TIMEOUT_MS`          | `5000`              | SQLite busy timeout (reduces transient “database is locked”) |
+| `RAPHAEL_SQLITE_BUSY_TIMEOUT_MS`          | `50`              | SQLite busy timeout, capped at 100ms; coordinated worker grants avoid competing application writers |
 | `RAPHAEL_SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000`              | WAL autocheckpoint pages (prevents unbounded WAL growth)     |
 | `RAPHAEL_INGEST_BROADCAST_MAX_ITEMS`      | `500`               | Max rows broadcast per ingest request (caps WS payload size) |
 | `RAPHAEL_INGEST_BROADCAST_BATCH_SIZE`     | `200`               | Rows per WebSocket message (batches WS frames)               |
@@ -202,11 +202,11 @@ curl -X POST http://localhost:6274/v1/events \
 | `RAPHAEL_WS_MAX_BUFFERED_BYTES`            | `1048576`           | Backpressure limit before slow WebSocket clients are closed  |
 | `RAPHAEL_RETENTION_ENABLED`               | `true`              | Enable background retention pruning                          |
 | `RAPHAEL_RETENTION_INITIAL_DELAY_MS`      | `15000`             | Delay before first background retention run                  |
-| `RAPHAEL_RETENTION_INTERVAL_MS`           | `60000`             | Background retention interval (capped to 10s..1h)            |
-| `RAPHAEL_PRUNE_BATCH_SIZE`                | `1000`              | Retention delete batch size (capped to 100..50000)           |
-| `RAPHAEL_PRUNE_MAX_RUNTIME_MS`            | `100`               | Time budget per pruning run (capped to 25..5000ms)           |
-| `RAPHAEL_SQLITE_FULL_VACUUM`               | `false`             | Force full SQLite VACUUM during compaction                   |
-| `RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES` | `2048`             | Legacy setting; full VACUUM now requires explicit opt-in      |
+| `RAPHAEL_RETENTION_INTERVAL_MS`           | `172800000`             | Two-day maintenance interval; configurable from 1 second to 365 days            |
+| `RAPHAEL_PRUNE_BATCH_SIZE`                | `1000`              | Retention delete batch size (1..50000)           |
+| `RAPHAEL_PRUNE_MAX_RUNTIME_MS`            | `30000`               | Worker prune budget per cycle (25ms..1h); incomplete cycles retry soon           |
+| `RAPHAEL_SQLITE_FULL_VACUUM`               | `false`             | Legacy direct helper flag; HTTP/scheduled maintenance uses RAPHAEL_MAINTENANCE_VACUUM_POLICY                   |
+| `RAPHAEL_SQLITE_FULL_VACUUM_MIN_FREE_PAGES` | `2048`             | Legacy flag; HTTP/scheduled maintenance uses RAPHAEL_MAINTENANCE_VACUUM_MIN_BYTES      |
 | `RAPHAEL_SQLITE_INCREMENTAL_VACUUM_MAX_PAGES` | `2048`         | Max free pages to reclaim per manual incremental vacuum      |
 | `RAPHAEL_TRACE_DEDUP_ID_WINDOW_SIZE`      | `10000`             | Trace id window scanned per manual duplicate cleanup batch   |
 | `RAPHAEL_TRACE_DEDUP_MAX_RUNTIME_MS`      | `500`               | Time budget per manual duplicate cleanup run                 |
@@ -236,7 +236,9 @@ See `docs/hosting.md` for a simple Docker hosting setup (non-root, read-only roo
 - Ingestion endpoints support selecting a Drop by name via the `X-Raphael-Drop` header (or `?drop=` query param).
 - Each Drop has independent retention rules (defaults: traces **3 days**, events **7 days**) configurable in the UI.
 
-Retention cleanup is intentionally low impact: it only runs in the background scheduler, never in dashboard/list/query request paths, and retention setting changes do not prune inline. Each run is time-budgeted, uses indexed `(drop_id, created_at)` predicates, alternates trace/event delete batches, and backs off on SQLite busy/lock errors. For maintenance windows, temporarily increase `RAPHAEL_PRUNE_BATCH_SIZE` and `RAPHAEL_PRUNE_MAX_RUNTIME_MS`; automatic `VACUUM` is not run during normal operation.
+Retention and compaction run on a storage worker. Ingestion is acknowledged only after a durable disk queue write, and queues replay after crashes. Per-drop trace/event source-time cutoffs remain independent; previously stored rows keep arrival-time retention. The default maintenance interval is two days. Every cycle prunes in bounded batches and runs native compaction only above the reclaimable-space threshold, with coordinated database/auth access and disk checks. Queries retry briefly during maintenance; existing-drop ingestion and `/health` remain available.
+
+See [durable ingestion and maintenance](docs/telemetry-maintenance.md) for configuration, timestamp rules, failure recovery, rollout prerequisites, and local verification. Existing deployment settings still override defaults; updating exporters/collector persistent queues and handling first-migration downtime are separate deployment work.
 
 Trace span deduplication is also kept out of startup. New duplicate spans are ignored on ingest, and older duplicates can be cleaned with the admin maintenance endpoint in bounded id windows during a maintenance window.
 

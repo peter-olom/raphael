@@ -1,3 +1,4 @@
+import { requestMaintenance } from '../retention.js';
 import { Router, Request, Response } from 'express';
 import {
   DEFAULT_DROP_ID,
@@ -23,7 +24,6 @@ import {
   clearAll,
   listDrops,
   listUserDropPermissions,
-  compactDatabase,
   deleteDrop,
   setDropLabel,
   setDropRetentionMs,
@@ -399,7 +399,7 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
 apiRouter.post('/maintenance/compact', (_req: Request, res: Response) => {
   if (!requireAdmin(_req, res)) return;
   try {
-    res.json(compactDatabase());
+    res.status(202).json({ accepted: true, maintenance: requestMaintenance('manual compact') });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message || 'Failed to compact database' });
   }

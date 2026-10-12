@@ -27,6 +27,8 @@ const insertWideEventStmt = db.prepare(`
 `);
 
 export type TraceInsertRow = {
+  telemetry_time?: number;
+  created_at?: number;
   drop_id: number;
   trace_id: string;
   span_id: string;
@@ -41,6 +43,8 @@ export type TraceInsertRow = {
 };
 
 export type WideEventInsertRow = {
+  telemetry_time?: number;
+  created_at?: number;
   drop_id: number;
   trace_id: string | null;
   service_name: string;

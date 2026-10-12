@@ -1,3 +1,4 @@
+import { beginDatabaseOperation, retryMaintenance } from '../maintenanceGate.js';
 import { Router, Request, Response } from 'express';
 import {
   getAppSetting,
@@ -112,6 +113,9 @@ adminRouter.get('/users', (req: Request, res: Response) => {
 });
 
 adminRouter.post('/users', async (req: Request, res: Response) => {
+  const release = beginDatabaseOperation(true);
+  if (!release) return retryMaintenance(res);
+  try {
   if (!requireAdmin(req, res)) return;
 
   if (!authEnabled() || !isTruthy(process.env.RAPHAEL_AUTH_EMAIL_PASSWORD_ENABLED)) {
@@ -203,6 +207,7 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
     console.error('Failed to create user:', error);
     res.status(400).json({ error: (error as Error).message || 'Failed to create user' });
   }
+  } finally { release(); }
 });
 
 adminRouter.patch('/users/:id', (req: Request, res: Response) => {
