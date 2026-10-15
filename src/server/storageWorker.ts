@@ -150,11 +150,40 @@ async function drain() {
 }
 function pragmaNumber(name: string) { return Number(db.pragma(name, { simple: true })); }
 let maintenanceProgress: any = null;
-async function maintain(options: { reason?: string; force?: boolean }) {
+async function maintain(options: { reason?: string; force?: boolean; index_only?: boolean }) {
   const started = Date.now();
   const cutoffTime = started;
   const results: RetentionPruneResult[] = [];
   maintenanceProgress = { success: false, complete: false, reason: options.reason || 'manual', results, phase: 'pruning' };
+  if (options.index_only) {
+    // Explicitly requested, behind the paused-writer/request gate. Never at
+    // startup or as an unexpected addition to scheduled retention.
+    // Nonunique preserves historical duplicates and span_id IS NULL semantics.
+    const indexStarted = Date.now();
+    const indexExists = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'idx_traces_drop_trace_span'").get();
+    if (!indexExists) {
+      maintenanceProgress.phase = 'indexing';
+      port.postMessage({ type: 'phase', phase: 'indexing' });
+      const size = pragmaNumber('page_count') * pragmaNumber('page_size');
+      const disk = await fs.statfs(path.dirname(dbPath));
+      const temporaryDisk = await fs.statfs(process.env.SQLITE_TMPDIR!);
+      // Conservative allowance for the new index, WAL, sort files and queue growth.
+      const reserve = config.min_free_disk_bytes + config.queue_max_bytes;
+      if (Number(disk.bavail) * Number(disk.bsize) < size * 4 + reserve ||
+          Number(temporaryDisk.bavail) * Number(temporaryDisk.bsize) < size * 4 + reserve) {
+        throw new Error('Insufficient free disk for trace span index; database and durable queue retained');
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS idx_traces_drop_trace_span ON traces(drop_id, trace_id, span_id)');
+    }
+    const traceSpanIndex = { created: !indexExists, duration_ms: Date.now() - indexStarted };
+    maintenanceProgress.trace_span_index = traceSpanIndex;
+    maintenanceProgress.phase = 'checkpointing';
+    port.postMessage({ type: 'phase', phase: 'checkpointing' });
+    const checkpoint = db.pragma('wal_checkpoint(TRUNCATE)') as any[];
+    if (checkpoint.some((row) => row.busy)) throw new Error('SQLite checkpoint is busy; external connection must release its transaction');
+    return { success: true, complete: true, reason: options.reason || 'manual', results,
+      index_only: true, trace_span_index: traceSpanIndex, duration_ms: Date.now() - started };
+  }
   port.postMessage({ type: 'phase', phase: 'pruning' });
   let complete = true;
   const deadline = started + config.prune_max_runtime_ms;
