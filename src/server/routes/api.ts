@@ -420,7 +420,8 @@ apiRouter.post('/dashboards/generate', async (req: Request, res: Response) => {
 apiRouter.post('/maintenance/compact', (_req: Request, res: Response) => {
   if (!requireAdmin(_req, res)) return;
   try {
-    res.status(202).json({ accepted: true, maintenance: requestMaintenance('manual compact') });
+    const indexOnly = _req.body?.index_only === true;
+    res.status(202).json({ accepted: true, maintenance: requestMaintenance(indexOnly ? 'manual trace span index' : 'manual compact', { index_only: indexOnly }) });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message || 'Failed to compact database' });
   }

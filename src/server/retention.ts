@@ -63,8 +63,9 @@ function schedule(delayMs: number, align = true) {
   };
   arm();
 }
-export async function runRetentionOnce(reason = 'manual') {
+export async function runRetentionOnce(reason = 'manual', options: { index_only?: boolean } = {}) {
   if (running) { skippedOverlappingRuns++; return getRetentionSchedulerStatus(); }
+  const scheduledAt = nextRunAt ?? (lastSuccessAt === null ? Date.now() + maintenanceConfig.initial_delay_ms : lastSuccessAt + maintenanceConfig.interval_ms);
   running = true; phase = 'preparing'; lastStartedAt = Date.now(); nextRunAt = null;
   if (timer) { clearTimeout(timer); timer = null; }
   let gateClosed = false;
@@ -75,11 +76,11 @@ export async function runRetentionOnce(reason = 'manual') {
     gateClosed = true;
     await closeDatabaseGate();
     captureMaintenanceSnapshot();
-    lastOperation = await storageCommand('maintenance', { reason });
+    lastOperation = await storageCommand('maintenance', { reason, ...options });
     lastResults = lastOperation.results;
     lastError = lastOperation.vacuum_skipped === 'insufficient_free_disk' ? 'Compaction skipped: insufficient free disk; pruning completed' : null;
     completedRuns++;
-    if (lastOperation.complete && !lastError) lastSuccessAt = Date.now();
+    if (!options.index_only && lastOperation.complete && !lastError) lastSuccessAt = Date.now();
   } catch (error) {
     errorRuns++;
     if ((error as any).partial_result) { lastOperation = (error as any).partial_result; lastResults = lastOperation.results; }
@@ -91,13 +92,14 @@ export async function runRetentionOnce(reason = 'manual') {
     await storageCommand('resume');
     running = false; phase = lastError ? 'failed' : 'idle'; lastFinishedAt = Date.now();
     lastDurationMs = lastStartedAt === null ? null : lastFinishedAt - lastStartedAt;
-    schedule(lastError || lastOperation?.complete === false ? Math.min(60_000, maintenanceConfig.interval_ms) : maintenanceConfig.interval_ms, !lastError && lastOperation?.complete !== false);
+    const delay = options.index_only ? Math.max(0, scheduledAt - Date.now()) : maintenanceConfig.interval_ms;
+    schedule(lastError || lastOperation?.complete === false ? Math.min(60_000, maintenanceConfig.interval_ms) : delay, !options.index_only && !lastError && lastOperation?.complete !== false);
     try { await persist(); } catch (error) { lastError = `Could not persist maintenance status: ${(error as Error).message}`; phase = 'failed'; }
   }
   return getRetentionSchedulerStatus();
 }
-export function requestMaintenance(reason = 'manual') {
-  if (!running) setImmediate(() => { void runRetentionOnce(reason); });
+export function requestMaintenance(reason = 'manual', options: { index_only?: boolean } = {}) {
+  if (!running) setImmediate(() => { void runRetentionOnce(reason, options); });
   return getRetentionSchedulerStatus();
 }
 export function startRetentionScheduler() {
