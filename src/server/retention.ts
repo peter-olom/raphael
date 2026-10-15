@@ -92,8 +92,8 @@ export async function runRetentionOnce(reason = 'manual', options: { index_only?
     await storageCommand('resume');
     running = false; phase = lastError ? 'failed' : 'idle'; lastFinishedAt = Date.now();
     lastDurationMs = lastStartedAt === null ? null : lastFinishedAt - lastStartedAt;
-    const delay = options.index_only ? Math.max(0, scheduledAt - Date.now()) : maintenanceConfig.interval_ms;
-    schedule(lastError || lastOperation?.complete === false ? Math.min(60_000, maintenanceConfig.interval_ms) : delay, !options.index_only && !lastError && lastOperation?.complete !== false);
+    if (options.index_only) schedule(Math.max(0, scheduledAt - Date.now()), false);
+    else schedule(lastError || lastOperation?.complete === false ? Math.min(60_000, maintenanceConfig.interval_ms) : maintenanceConfig.interval_ms, !lastError && lastOperation?.complete !== false);
     try { await persist(); } catch (error) { lastError = `Could not persist maintenance status: ${(error as Error).message}`; phase = 'failed'; }
   }
   return getRetentionSchedulerStatus();
